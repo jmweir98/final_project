@@ -30,6 +30,10 @@ class CompareRequest(BaseModel):
     end: LatLon
 
 
+class EnrichRequest(BaseModel):
+    geometry: List[List[float]]  # [[lat, lon], ...]
+
+
 def haversine_m(lat1, lon1, lat2, lon2) -> float:
     R = 6371000.0
     p1, p2 = math.radians(lat1), math.radians(lat2)
@@ -74,6 +78,16 @@ def build_elevation_profile(points: List[List[float]], elevations: List[float]):
         })
 
     return profile
+
+def nearest_profile_distance(profile: List[dict], lat: float, lon: float) -> float:
+    best_d = 1e18
+    best_dist = 0.0
+    for pt in profile:
+        d = haversine_m(lat, lon, pt["lat"], pt["lon"])
+        if d < best_d:
+            best_d = d
+            best_dist = pt["dist_m"]
+    return round(best_dist, 1)
 
 async def get_elevations_open_meteo(client: httpx.AsyncClient, pts: List[List[float]]) -> List[float]:
     """
@@ -145,16 +159,20 @@ def build_overpass_poly_query(points: List[List[float]]) -> str:
     """
 
     # Downsample heavily so query string is not enormous
-    sampled = downsample(points, max_points=40)
+    sampled = downsample(points, max_points=20)
 
     coord_string = " ".join(f"{lat} {lon}" for lat, lon in sampled)
 
     query = f"""
 [out:json][timeout:25];
 (
-  way(poly:"{coord_string}")[highway];
+  way(poly:"{coord_string}")[highway~"^(footway|path|pedestrian|steps|living_street|residential|service|unclassified)$"];
+  node(poly:"{coord_string}")[kerb];
+  node(poly:"{coord_string}")[curb];
+  node(poly:"{coord_string}")[highway=crossing];
+  node(poly:"{coord_string}")[tactile_paving];
 );
-out tags;
+out tags geom;
 """
     return query.strip()
 
@@ -183,6 +201,11 @@ async def query_overpass_tags(client: httpx.AsyncClient, geometry_latlon: List[L
     wheelchair = {}
     inclines = {}
     steps_count = 0
+    steps_ways = []
+
+    kerb_nodes = 0
+    crossing_nodes = 0
+    tactile_nodes = 0
 
     total_way_count = 0
     known_surface_way_count = 0
@@ -193,10 +216,20 @@ async def query_overpass_tags(client: httpx.AsyncClient, geometry_latlon: List[L
         d[key] = d.get(key, 0) + 1
 
     for el in elements:
+        tags = el.get("tags", {}) or {}
+
+        if el.get("type") == "node":
+            if "kerb" in tags or "curb" in tags:
+                kerb_nodes += 1
+            if tags.get("highway") == "crossing":
+                crossing_nodes += 1
+            if "tactile_paving" in tags:
+                tactile_nodes += 1
+            continue
+
         if el.get("type") != "way":
             continue
 
-        tags = el.get("tags", {})
         hw = tags.get("highway")
         if not hw:
             continue
@@ -206,6 +239,14 @@ async def query_overpass_tags(client: httpx.AsyncClient, geometry_latlon: List[L
 
         if hw == "steps":
             steps_count += 1
+
+            # Overpass returns geometry as [{"lat":..,"lon":..}, ...]
+            geom = el.get("geometry") or []
+            if geom:
+                steps_ways.append({
+                    "osm_id": el.get("id"),
+                    "geometry": [[p["lat"], p["lon"]] for p in geom if "lat" in p and "lon" in p]
+                })
 
         s = tags.get("surface")
         if s:
@@ -234,6 +275,7 @@ async def query_overpass_tags(client: httpx.AsyncClient, geometry_latlon: List[L
 
     return {
         "steps_count": steps_count,
+        "steps_ways": steps_ways,
         "surfaces": surfaces,
         "smoothness": smoothness,
         "sidewalk": sidewalk,
@@ -241,7 +283,10 @@ async def query_overpass_tags(client: httpx.AsyncClient, geometry_latlon: List[L
         "wheelchair_tags": wheelchair,
         "inclines": inclines,
         "unknown_surface_ratio": unknown_surface_ratio,
-        "way_count_sampled": total_way_count
+        "way_count_sampled": total_way_count,
+        "kerb_nodes_count": kerb_nodes,
+        "crossing_nodes_count": crossing_nodes,
+        "tactile_paving_nodes_count": tactile_nodes,
     }
 
 def score_route(distance_m: float, elev: dict, osm: dict | None):
@@ -250,10 +295,12 @@ def score_route(distance_m: float, elev: dict, osm: dict | None):
     Returns (score, flags)
     """
     flags = []
-    osm = osm or {}
 
-    if not osm:
-        flags.append("OSM surface/kerb data not available")
+    if osm is None:
+        flags.append("OSM data not fetched (performance mode)")
+        osm = {}
+    elif len(osm) == 0:
+        flags.append("OSM data fetched but no tags found")
 
     dist_km = distance_m / 1000.0
     ascent = elev["ascent_m"]
@@ -320,7 +367,7 @@ async def compare_routes(payload: CompareRequest):
             elev_metrics = compute_elevation_metrics(geom, elev)
             elevation_profile = build_elevation_profile(geom, elev)
             osm_summary = None
-            score, flags = score_route(rt["distance"], elev_metrics, {})
+            score, flags = score_route(rt["distance"], elev_metrics, None)
 
             routes_out.append({
                 "id": f"route-{i+1}",
@@ -349,8 +396,37 @@ async def compare_routes(payload: CompareRequest):
             best["accessibility_score"] = best_score
             best["flags"] = best_flags
 
+            # Compute step warnings
+            step_warnings = []
+            for sw in osm_summary.get("steps_ways", []):
+                g = sw.get("geometry", [])
+                if not g:
+                    continue
+                mid = g[len(g)//2]  # midpoint of the steps polyline [lat, lon]
+                dist_along = nearest_profile_distance(best["elevation_profile"], mid[0], mid[1])
+
+                step_warnings.append({
+                    "osm_id": sw.get("osm_id"),
+                    "lat": mid[0],
+                    "lon": mid[1],
+                    "dist_m": dist_along
+                })
+
+            best["step_warnings"] = step_warnings
+
             routes_out.sort(key=lambda r: r["accessibility_score"])
         except Exception:
             pass
 
     return {"routes": routes_out}
+
+
+@app.post("/route/enrich")
+async def enrich_route(payload: EnrichRequest):
+    if not payload.geometry or len(payload.geometry) < 2:
+        raise HTTPException(status_code=400, detail="geometry must have 2+ points")
+
+    async with httpx.AsyncClient(timeout=25.0, verify=False) as client:
+        osm_summary = await query_overpass_tags(client, payload.geometry)
+
+    return {"osm_summary": osm_summary}

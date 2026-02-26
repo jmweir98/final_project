@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { MapContainer, TileLayer, Polyline, Marker, useMapEvents } from 'react-leaflet';
+import { MapContainer, TileLayer, Polyline, Marker, Popup, useMapEvents } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
 import { useEffect } from "react";
 import { useMap } from "react-leaflet";
@@ -142,13 +142,15 @@ type Route = {
   }>;
   osm_summary: {
     steps_count: number;
+    steps_ways?: { osm_id?: number; geometry: [number, number][] }[];
     surfaces: Record<string, number>;
     smoothness: Record<string, number>;
     highway_types: Record<string, number>;
     kerb_nodes_count: number;
     unknown_surface_ratio: number;
     sample_points_used: number;
-  };
+  } | null;
+  step_warnings?: { osm_id?: number; lat: number; lon: number; dist_m: number }[];
   accessibility_score: number;
   flags: string[];
 };
@@ -202,6 +204,45 @@ const RouteMap: React.FC = () => {
     }
   };
 
+  const enrichSelectedRoute = async () => {
+    if (!selectedRouteId) {
+      alert("Select a route first");
+      return;
+    }
+
+    const r = routes.find(x => x.id === selectedRouteId);
+    if (!r) return;
+
+    const res = await fetch("http://127.0.0.1:8000/route/enrich", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ geometry: r.geometry }),
+    });
+
+    if (!res.ok) {
+      const err = await res.text();
+      console.error("Enrich failed:", err);
+      alert("Enrich failed — check backend console");
+      return;
+    }
+
+    const data = await res.json();
+
+    setRoutes(prev =>
+      prev.map(x =>
+        x.id === selectedRouteId
+          ? {
+              ...x,
+              osm_summary: data.osm_summary ?? x.osm_summary,
+            }
+          : x
+      )
+    );
+
+    // Sanity check for coordinate order
+    console.log("steps sample", data.osm_summary?.steps_ways?.[0]?.geometry?.[0]);
+  };
+
   return (
     <div style={styles.container}>
       <div style={styles.header}>
@@ -219,6 +260,21 @@ const RouteMap: React.FC = () => {
               onMouseOut={(e) => e.currentTarget.style.backgroundColor = '#667eea'}
             >
               🗺️ Find Routes
+            </button>
+            <button 
+              onClick={enrichSelectedRoute} 
+              disabled={!selectedRouteId} 
+              style={{
+                ...styles.button,
+                marginTop: '8px',
+                backgroundColor: selectedRouteId ? '#28a745' : '#6c757d',
+                cursor: selectedRouteId ? 'pointer' : 'not-allowed',
+                opacity: selectedRouteId ? 1 : 0.6,
+              }}
+              onMouseOver={(e) => selectedRouteId && (e.currentTarget.style.backgroundColor = '#218838')}
+              onMouseOut={(e) => selectedRouteId && (e.currentTarget.style.backgroundColor = '#28a745')}
+            >
+              🏷️ Enrich Selected Route (OSM)
             </button>
           </div>
 
@@ -238,6 +294,7 @@ const RouteMap: React.FC = () => {
               const isRecommended = index === 0;
               const hasSteps = (r.osm_summary?.steps_count ?? 0) > 0;
               const isSelected = r.id === selectedRouteId;
+              const osmStatus = r.osm_summary ? "✅ OSM loaded" : "⚪ OSM not loaded";
               
               return (
                 <div key={r.id}>
@@ -261,6 +318,9 @@ const RouteMap: React.FC = () => {
                     </div>
                     <div style={{ fontSize: '13px', color: '#6c757d' }}>
                       ↗️ {r.elevation_metrics?.ascent_m || 0}m ascent • Steps: {r.osm_summary ? r.osm_summary.steps_count : "—"}
+                    </div>
+                    <div style={{ fontSize: '12px', color: '#6c757d', marginTop: '4px' }}>
+                      {osmStatus}
                     </div>
                   </button>
                   {r.flags && r.flags.length > 0 && (
@@ -356,6 +416,28 @@ const RouteMap: React.FC = () => {
                 />
               );
             })}
+
+            {(() => {
+              const selected = routes.find(r => r.id === selectedRouteId);
+              return selected?.osm_summary?.steps_ways?.map((sw, i) => (
+                <Polyline
+                  key={`steps-${sw.osm_id ?? i}`}
+                  positions={sw.geometry}
+                  pathOptions={{ color: "red", weight: 8, opacity: 1 }}
+                />
+              ));
+            })()}
+
+            {(() => {
+              const selected = routes.find(r => r.id === selectedRouteId);
+              return selected?.step_warnings?.map((w, i) => (
+                <Marker key={`warn-${w.osm_id ?? i}`} position={[w.lat, w.lon]}>
+                  <Popup>
+                    ⚠️ Steps at ~{Math.round(w.dist_m)}m along route
+                  </Popup>
+                </Marker>
+              ));
+            })()}
           </MapContainer>
         </div>
       </div>
