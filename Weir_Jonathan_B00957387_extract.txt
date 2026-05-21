@@ -1,0 +1,110 @@
+--- PAGE 1 ---
+COM668 Computing Project 
+ 
+Assessment Task 2 – Challenge Definition Report 
+ 
+ 
+ 
+Project title:  
+Route Wise: An Explainable Accessibility-Aware Route Planning System 
+with Venue Data and Community Reviews 
+ 
+ 
+ 
+Student name:  
+Jonathan Weir 
+ 
+Student ID number:  
+B00957387 
+ 
+ 
+ 
+PSG identifier:  
+PSG- P21 
+ 
+Mentor name:  
+David Glass 
+ 
+ 
+ 
+Course title:  
+COM668 (78888) - Computing Project 
+ 
+Year of submission:  
+2025/2026 
+ 
+ 
+ 
+Word Count (3600 Maximum):  
+3955 
+You are required to self-declare the word count in this report.  
+A falsified word count may be considered as academic misconduct. 
+This is in keeping with Ulster University policy. 
+The Module Handbook and guidance has advice regarding what must be included in the 
+word count. 
+ 
+ 
+Declaration:  
+I declare that this is all my own work. Any material I have referred to has been accurately referenced 
+and any contribution of Artificial Intelligence technology has been fully acknowledged. I understand 
+the importance of academic integrity and have read and understood the University’s General 
+Regulation: Student Academic Integrity and the Academic Misconduct Procedure. I understand that 
+I must not upload my work before, during or after submission to any unapproved plagiarism detectors 
+or answer sharing platforms, or equivalent, and that only University-approved platforms should be 
+used.
+
+
+--- PAGE 22 ---
+ 
+21
+The development process is structured into a series of iterations, each focusing on a subset of 
+system functionality. Early iterations prioritise core technical components, including route 
+generation, elevation analysis, and accessibility scoring, ensuring that high-risk elements are 
+addressed at an early stage. Later iterations focus on enhancing usability, integrating user-
+generated feedback, and refining system behaviour. Each iteration follows a consistent cycle of 
+planning, design, implementation, testing and evaluation, and review and refinement. 
+The project is planned across four iterations. Iteration 1 focuses on core routing infrastructure, 
+integrating OpenRouteService, retrieving elevation data from Open-Meteo, and implementing the 
+rule-based accessibility scoring model. Iteration 2 develops the frontend map interface, route 
+comparison view, and score explanation panel. Iteration 3 implements the venue information 
+component, user review submission, optional image upload, and authentication. Iteration 4 focuses 
+on system-wide testing, usability evaluation, performance assessment, and refinement based on 
+evaluation outcomes. Each iteration produces a working increment of the system, with 
+requirements reviewed and reprioritised at the start of each cycle in response to findings from the 
+previous iteration. The iteration cycle applied throughout development is illustrated in Figure 4.1. 
+ 
+Figure 4.1 — Agile iteration cycle applied throughout development  
+ 
+4.2. Initial plans 
+The research and requirements phase has involved literature review, analysis of existing systems, 
+and definition of system requirements, and is formalised through the submission of this report. 
+The design phase will follow, where system architecture, data models, and user interface concepts 
+will be developed. This phase must precede implementation to ensure technical decisions are 
+grounded in a validated understanding of system requirements and constraints. 
+The implementation phase will focus on core functionality, including integration with routing and 
+elevation APIs, development of the accessibility scoring model, and validation of route processing. 
+
+
+--- PAGE 23 ---
+ 
+22
+Once established, development will progress to additional features including user-generated 
+reviews, image handling, and authentication. 
+Testing and evaluation will be conducted throughout development, with more structured 
+assessment in later stages covering functional, performance, and usability testing. The final 
+refinement and documentation phase will involve system optimisation, identification of limitations, 
+and completion of the project review report. These phases provide the overarching project 
+structure, within which four Agile iterations operate during the implementation and testing phases. 
+This phased structure will prioritise high-risk core functionality early, ensuring critical components 
+such as API integration and scoring logic are validated before additional features are introduced. 
+Progress will be monitored against completion of planned features, system performance, and 
+usability feedback. A prioritised feature backlog is provided in Appendix 2. The release roadmap, 
+illustrating planned features, deliverables, and risks addressed per iteration, is provided in Figure 
+4.2. 
+ 
+Figure 4.2 — Release roadmap 
+ 
+ 
+ 
+ 
+ 

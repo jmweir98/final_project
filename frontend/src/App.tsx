@@ -1,12 +1,20 @@
-import React from 'react';
+import { BrowserRouter, Routes, Route } from 'react-router-dom';
+import './index.css';
+import NavBar from './components/NavBar';
 import RouteMap from './components/RouteMap';
+import ReviewPage from './pages/ReviewPage';
 
 function App() {
   return (
-    <div>
-      <h1>Route Comparison</h1>
-      <RouteMap />
-    </div>
+    <BrowserRouter>
+      <NavBar />
+      <main style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+        <Routes>
+          <Route path="/" element={<RouteMap />} />
+          <Route path="/review" element={<ReviewPage />} />
+        </Routes>
+      </main>
+    </BrowserRouter>
   );
 }
 
