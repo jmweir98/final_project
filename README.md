@@ -6,7 +6,7 @@ This project is a web-based accessible route comparison prototype. Users select 
 
 - Interactive map with start/end point selection.
 - Address search for setting start and destination points.
-- Pedestrian route retrieval using OSRM.
+- Pedestrian route retrieval using OpenRouteService.
 - Elevation sampling using the Open-Meteo Elevation API.
 - Elevation metrics including ascent, descent, maximum slope, and steep-distance thresholds.
 - Rule-based accessibility scoring.
@@ -28,12 +28,18 @@ The AT2 report proposed a wider system. The following items should be treated as
 
 ## APIs Used
 
-- OSRM route service for pedestrian route geometry.
+- OpenRouteService route service for pedestrian route geometry.
 - Open-Meteo Elevation API for elevation data.
 - OpenStreetMap/Overpass API for route-level accessibility tags.
 - SQLite for locally persisted review data.
 
-The AT2 report refers to OpenRouteService. The current implementation uses OSRM instead, so final documentation should either justify this substitution or update the wording.
+OpenRouteService requires an API key. Add it to `backend/.env` before starting the project:
+
+```text
+ORS_API_KEY=your_openrouteservice_key_here
+```
+
+OpenRouteService is required for route comparison. If the key is missing or the service is unavailable, route generation will fail gracefully with an error message.
 
 ## Running The Project
 
@@ -85,7 +91,7 @@ npm run build
 ## Known Limitations
 
 - External API availability affects route and enrichment results.
-- OSRM may return only one route depending on selected locations.
+- OpenRouteService may return only one distinct route depending on selected locations.
 - OSM accessibility tags are incomplete in many areas, so the application reports missing surface data rather than treating missing data as safe.
 - The scoring weights are rule-based and should be justified as a transparent prototype model, not a clinically or professionally certified accessibility assessment.
 - Venue data depends on OSM tag coverage and may be incomplete.

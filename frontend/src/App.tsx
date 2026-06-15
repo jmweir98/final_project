@@ -7,13 +7,15 @@ import ReviewPage from './pages/ReviewPage';
 function App() {
   return (
     <BrowserRouter>
-      <NavBar />
-      <main style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
-        <Routes>
-          <Route path="/" element={<RouteMap />} />
-          <Route path="/review" element={<ReviewPage />} />
-        </Routes>
-      </main>
+      <div className="h-screen flex flex-col bg-background overflow-hidden">
+        <NavBar />
+        <main className="flex-1 flex flex-col overflow-hidden">
+          <Routes>
+            <Route path="/" element={<RouteMap />} />
+            <Route path="/review" element={<ReviewPage />} />
+          </Routes>
+        </main>
+      </div>
     </BrowserRouter>
   );
 }

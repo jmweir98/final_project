@@ -1,7 +1,11 @@
 from fastapi.testclient import TestClient
+import asyncio
 import pytest
 
+import config
 import main
+import osm
+import routing
 from main import app, compute_elevation_metrics, downsample, score_route
 
 
@@ -242,3 +246,115 @@ def test_geocode_search_returns_results(monkeypatch):
     assert len(results) == 1
     assert results[0]["label"].startswith("Belfast City Hall")
     assert results[0]["lat"] == 54.5964
+
+
+def test_ors_route_normalises_geojson_response(monkeypatch):
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {
+                "features": [{
+                    "geometry": {
+                        "type": "LineString",
+                        "coordinates": [[-5.93, 54.6], [-5.931, 54.601]],
+                    },
+                    "properties": {
+                        "summary": {"distance": 123.4, "duration": 98.7},
+                    },
+                }],
+            }
+
+    class FakeClient:
+        async def post(self, url, json, headers):
+            assert url.endswith("/v2/directions/foot-walking/geojson")
+            assert headers["Authorization"] == "test-key"
+            assert json["coordinates"] == [[-5.93, 54.6], [-5.931, 54.601]]
+            assert json["alternative_routes"]["target_count"] == 2
+            return FakeResponse()
+
+    monkeypatch.setattr(config, "ORS_API_KEY", "test-key")
+
+    routes = asyncio.run(routing.ors_route(FakeClient(), "-5.93,54.6", "-5.931,54.601"))
+
+    assert routes == [{
+        "geometry": {"coordinates": [[-5.93, 54.6], [-5.931, 54.601]]},
+        "distance": 123.4,
+        "duration": 98.7,
+        "provider": "openrouteservice",
+    }]
+
+
+def test_routing_routes_uses_openrouteservice(monkeypatch):
+    async def fake_ors_route(*_args, **_kwargs):
+        return [{
+            "geometry": {"coordinates": [[-5.93, 54.6], [-5.931, 54.601]]},
+            "distance": 123.4,
+            "duration": 98.7,
+            "provider": "openrouteservice",
+        }]
+
+    monkeypatch.setattr(config, "ORS_API_KEY", "test-key")
+    monkeypatch.setattr(routing, "ors_route", fake_ors_route)
+
+    routes = asyncio.run(routing.routing_routes(object(), "-5.93,54.6", "-5.931,54.601"))
+
+    assert routes[0]["provider"] == "openrouteservice"
+
+
+def test_routing_routes_returns_empty_for_silent_openrouteservice_failure(monkeypatch):
+    async def fake_ors_route(*_args, **_kwargs):
+        return []
+
+    monkeypatch.setattr(config, "ORS_API_KEY", "test-key")
+    monkeypatch.setattr(routing, "ors_route", fake_ors_route)
+
+    routes = asyncio.run(
+        routing.routing_routes(object(), "-5.93,54.6", "-5.931,54.601", "-5.932,54.601", silent=True)
+    )
+
+    assert routes == []
+
+
+def test_post_overpass_tries_next_endpoint_after_request_failure(monkeypatch):
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {"elements": [{"id": 1}]}
+
+    class FakeClient:
+        def __init__(self):
+            self.calls = 0
+
+        async def post(self, url, data, headers):
+            self.calls += 1
+            if self.calls == 1:
+                raise main.httpx.ConnectError("connection closed")
+            return FakeResponse()
+
+    monkeypatch.setattr(config, "OVERPASS_ENDPOINTS", ["https://bad.test/api", "https://good.test/api"])
+    client = FakeClient()
+
+    data = asyncio.run(osm.post_overpass(client, "[out:json];node(1);out;", "Test query"))
+
+    assert data["elements"][0]["id"] == 1
+    assert client.calls == 2
+
+
+def test_post_overpass_reports_all_endpoint_failures(monkeypatch):
+    class FakeResponse:
+        status_code = 429
+        text = "rate limited"
+
+    class FakeClient:
+        async def post(self, url, data, headers):
+            return FakeResponse()
+
+    monkeypatch.setattr(config, "OVERPASS_ENDPOINTS", ["https://busy.test/api"])
+
+    with pytest.raises(main.HTTPException) as exc:
+        asyncio.run(osm.post_overpass(FakeClient(), "[out:json];node(1);out;", "Test query"))
+
+    assert exc.value.status_code == 502
+    assert "failed via all Overpass endpoints" in exc.value.detail

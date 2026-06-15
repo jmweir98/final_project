@@ -1,5 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
+import { ArrowLeft, Star, Upload, X, Loader2, Accessibility } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { Textarea } from '@/components/ui/textarea';
+import { Badge } from '@/components/ui/badge';
+import { Label } from '@/components/ui/label';
+import { cn } from '@/lib/utils';
 
 const API_BASE_URL = 'http://127.0.0.1:8000';
 
@@ -16,95 +22,6 @@ type Review = {
 
 const RATING_LABELS = ['Not accessible', 'Difficult access', 'Mixed accessibility', 'Mostly accessible', 'Very accessible'];
 
-const RATING_COLORS = ['#dc3545', '#fd7e14', '#ffc107', '#20c997', '#28a745'];
-
-const StarRating: React.FC<{ value: number; onChange: (v: number) => void }> = ({ value, onChange }) => {
-  const [hover, setHover] = useState(0);
-  const active = hover || value;
-
-  return (
-    <div>
-      <div style={{ display: 'flex', gap: '4px', marginBottom: '6px' }}>
-        {[1, 2, 3, 4, 5].map((star) => (
-          <button
-            key={star}
-            type="button"
-            onMouseEnter={() => setHover(star)}
-            onMouseLeave={() => setHover(0)}
-            onClick={() => onChange(star)}
-            style={{
-              fontSize: '36px',
-              color: star <= active ? '#f59e0b' : '#d1d5db',
-              background: 'none',
-              border: 'none',
-              padding: '0 2px',
-              cursor: 'pointer',
-              lineHeight: 1,
-              transition: 'color 0.1s, transform 0.1s',
-              transform: star <= active ? 'scale(1.1)' : 'scale(1)',
-            }}
-            aria-label={`Rate ${star} star${star !== 1 ? 's' : ''}`}
-          >
-            ★
-          </button>
-        ))}
-      </div>
-      {active > 0 && (
-        <span style={{
-          fontSize: '13px',
-          fontWeight: 500,
-          color: RATING_COLORS[active - 1],
-          background: `${RATING_COLORS[active - 1]}18`,
-          padding: '2px 10px',
-          borderRadius: '20px',
-        }}>
-          {RATING_LABELS[active - 1]}
-        </span>
-      )}
-    </div>
-  );
-};
-
-const StarDisplay: React.FC<{ rating: number }> = ({ rating }) => (
-  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-    <span style={{ color: '#f59e0b', fontSize: '16px', letterSpacing: '1px' }}>
-      {'★'.repeat(rating)}{'☆'.repeat(5 - rating)}
-    </span>
-    <span style={{
-      fontSize: '12px',
-      fontWeight: 500,
-      color: RATING_COLORS[rating - 1],
-      background: `${RATING_COLORS[rating - 1]}18`,
-      padding: '1px 8px',
-      borderRadius: '20px',
-    }}>
-      {RATING_LABELS[rating - 1]}
-    </span>
-  </div>
-);
-
-const inputStyle: React.CSSProperties = {
-  width: '100%',
-  padding: '10px 12px',
-  borderRadius: '8px',
-  border: '1.5px solid #dee2e6',
-  fontSize: '14px',
-  color: '#212529',
-  background: '#fff',
-  outline: 'none',
-  transition: 'border-color 0.15s',
-  marginTop: '6px',
-};
-
-const labelStyle: React.CSSProperties = {
-  display: 'block',
-  fontSize: '13px',
-  fontWeight: 600,
-  color: '#495057',
-  marginBottom: '0',
-  letterSpacing: '0.2px',
-};
-
 const ReviewPage: React.FC = () => {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
@@ -115,6 +32,7 @@ const ReviewPage: React.FC = () => {
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [rating, setRating] = useState(5);
+  const [hoveredRating, setHoveredRating] = useState(0);
   const [comment, setComment] = useState('');
   const [notes, setNotes] = useState('');
   const [image, setImage] = useState<File | null>(null);
@@ -132,18 +50,13 @@ const ReviewPage: React.FC = () => {
         const data = await res.json();
         setReviews(Array.isArray(data?.reviews) ? data.reviews : []);
       }
-    } catch {
-      // silently fail — reviews list just stays empty
-    } finally {
-      setIsLoading(false);
-    }
+    } catch { /* silent */ }
+    finally { setIsLoading(false); }
   };
 
   useEffect(() => {
     loadReviews();
-    return () => {
-      if (successTimer.current) clearTimeout(successTimer.current);
-    };
+    return () => { if (successTimer.current) clearTimeout(successTimer.current); };
   }, [venueId]);
 
   const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -151,17 +64,14 @@ const ReviewPage: React.FC = () => {
     setImage(file);
     if (file) {
       const reader = new FileReader();
-      reader.onload = (ev) => setImagePreview(ev.target?.result as string);
+      reader.onload = ev => setImagePreview(ev.target?.result as string);
       reader.readAsDataURL(file);
-    } else {
-      setImagePreview(null);
-    }
+    } else { setImagePreview(null); }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!comment.trim()) return;
-
     const formData = new FormData();
     formData.append('venue_osm_id', venueId);
     formData.append('venue_name', venueName);
@@ -170,360 +80,175 @@ const ReviewPage: React.FC = () => {
     formData.append('accessibility_notes', notes);
     if (image) formData.append('image', image);
 
-    setIsSubmitting(true);
-    setErrorMessage('');
+    setIsSubmitting(true); setErrorMessage('');
     try {
       const res = await fetch(`${API_BASE_URL}/reviews`, { method: 'POST', body: formData });
       if (res.ok) {
-        setRating(5);
-        setComment('');
-        setNotes('');
-        setImage(null);
-        setImagePreview(null);
+        setRating(5); setComment(''); setNotes(''); setImage(null); setImagePreview(null);
         setSuccessMessage('Review submitted — thank you!');
         successTimer.current = setTimeout(() => setSuccessMessage(''), 5000);
         await loadReviews();
-      } else {
-        const err = await res.text();
-        setErrorMessage(`Submission failed: ${err}`);
-      }
-    } catch {
-      setErrorMessage('Could not reach the server. Check the backend is running.');
-    } finally {
-      setIsSubmitting(false);
-    }
+      } else { setErrorMessage(`Submission failed: ${await res.text()}`); }
+    } catch { setErrorMessage('Could not reach the server.'); }
+    finally { setIsSubmitting(false); }
   };
-
-  const cardStyle: React.CSSProperties = {
-    background: 'white',
-    borderRadius: '10px',
-    padding: '24px',
-    boxShadow: '0 2px 12px rgba(0,0,0,0.07)',
-    marginBottom: '20px',
-  };
-
-  const goBackToPlanner = () => navigate('/');
 
   if (!venueId) {
     return (
-      <div style={{ textAlign: 'center', padding: '80px 20px' }}>
-        <div style={{ fontSize: '48px', marginBottom: '16px' }}>?</div>
-        <h2 style={{ margin: '0 0 8px' }}>No venue selected</h2>
-        <p style={{ color: '#6c757d', marginBottom: '24px' }}>
-          Go back to the route planner and select a nearby venue first.
-        </p>
-        <button
-          onClick={goBackToPlanner}
-          style={{
-            background: '#667eea',
-            color: 'white',
-            border: 'none',
-            borderRadius: '8px',
-            padding: '12px 24px',
-            fontSize: '15px',
-            fontWeight: 500,
-            cursor: 'pointer',
-          }}
-        >
-          Back to Route Planner
-        </button>
+      <div className="flex flex-col items-center justify-center flex-1 text-center p-8">
+        <div className="h-16 w-16 rounded-full bg-muted flex items-center justify-center mb-4">
+          <Accessibility className="h-8 w-8 text-muted-foreground" />
+        </div>
+        <h2 className="text-lg font-semibold text-foreground mb-2">No venue selected</h2>
+        <p className="text-sm text-muted-foreground mb-6">Go back to the route planner and select a venue first.</p>
+        <Button onClick={() => navigate('/')}>Back to Route Planner</Button>
       </div>
     );
   }
 
   return (
-    <div style={{ width: '100%', maxWidth: '1180px', margin: '0 auto', padding: '28px 24px 60px' }}>
-      <button
-        onClick={goBackToPlanner}
-        style={{
-          position: 'sticky',
-          top: '72px',
-          zIndex: 20,
-          background: '#667eea',
-          border: 'none',
-          borderRadius: '8px',
-          padding: '10px 16px',
-          fontSize: '14px',
-          color: 'white',
-          cursor: 'pointer',
-          display: 'inline-flex',
-          alignItems: 'center',
-          gap: '6px',
-          marginBottom: '20px',
-          fontWeight: 700,
-          transition: 'all 0.15s',
-          boxShadow: '0 3px 10px rgba(0,0,0,0.18)',
-        }}
-        onMouseOver={(e) => {
-          e.currentTarget.style.background = '#5568d3';
-        }}
-        onMouseOut={(e) => {
-          e.currentTarget.style.background = '#667eea';
-        }}
-      >
-        Back to loaded route
-      </button>
-
-      <div style={{ marginBottom: '28px' }}>
-        <p style={{ margin: '0 0 4px', fontSize: '13px', fontWeight: 600, color: '#667eea', textTransform: 'uppercase', letterSpacing: '0.8px' }}>
-          Community Reviews
-        </p>
-        <h1 style={{ margin: '0', fontSize: '28px', fontWeight: 700, color: '#212529' }}>
-          {venueName}
-        </h1>
-      </div>
-
-      <div
-        style={{
-          display: 'grid',
-          gap: '24px',
-        }}
-      >
-      {/* Review submission form */}
-      <div style={cardStyle}>
-        <h2 style={{ margin: '0 0 20px', fontSize: '18px', fontWeight: 600, color: '#212529' }}>
-          Write a Review
-        </h2>
-
-        {successMessage && (
-          <div style={{
-            background: '#d4edda',
-            color: '#155724',
-            border: '1px solid #c3e6cb',
-            borderRadius: '8px',
-            padding: '12px 16px',
-            marginBottom: '20px',
-            fontSize: '14px',
-            fontWeight: 500,
-          }}>
-            {successMessage}
-          </div>
-        )}
-
-        {errorMessage && (
-          <div style={{
-            background: '#f8d7da',
-            color: '#721c24',
-            border: '1px solid #f5c6cb',
-            borderRadius: '8px',
-            padding: '12px 16px',
-            marginBottom: '20px',
-            fontSize: '14px',
-          }}>
-            {errorMessage}
-          </div>
-        )}
-
-        <form
-          onSubmit={handleSubmit}
-          style={{
-            display: 'grid',
-            gridTemplateColumns: 'minmax(280px, 0.9fr) minmax(360px, 1.1fr)',
-            gap: '20px 24px',
-            alignItems: 'start',
-          }}
-        >
-          <div>
-            <label style={labelStyle}>Accessibility Rating</label>
-            <div style={{ marginTop: '10px' }}>
-              <StarRating value={rating} onChange={setRating} />
-            </div>
-          </div>
-
-          <div>
-            <label style={labelStyle}>
-              Your Review <span style={{ color: '#dc3545' }}>*</span>
-            </label>
-            <textarea
-              value={comment}
-              onChange={(e) => setComment(e.target.value)}
-              rows={4}
-              required
-              placeholder="Describe the accessibility of this venue — entrance, ramps, internal layout, staff helpfulness..."
-              style={{ ...inputStyle, resize: 'vertical' }}
-              onFocus={(e) => (e.target.style.borderColor = '#667eea')}
-              onBlur={(e) => (e.target.style.borderColor = '#dee2e6')}
-            />
-          </div>
-
-          <div>
-            <label style={labelStyle}>Accessibility Notes</label>
-            <textarea
-              value={notes}
-              onChange={(e) => setNotes(e.target.value)}
-              rows={2}
-              placeholder="e.g. step at entrance, wide doorways, accessible toilet on ground floor..."
-              style={{ ...inputStyle, resize: 'vertical' }}
-              onFocus={(e) => (e.target.style.borderColor = '#667eea')}
-              onBlur={(e) => (e.target.style.borderColor = '#dee2e6')}
-            />
-          </div>
-
-          <div>
-            <label style={labelStyle}>Photo (optional)</label>
-            <div style={{
-              marginTop: '8px',
-              border: '2px dashed #dee2e6',
-              borderRadius: '10px',
-              padding: '16px',
-              textAlign: 'center',
-              cursor: 'pointer',
-              background: '#f8f9fa',
-              transition: 'border-color 0.15s',
-            }}>
-              <input
-                type="file"
-                accept="image/png,image/jpeg,image/webp"
-                onChange={handleImageChange}
-                style={{ display: 'block', width: '100%', cursor: 'pointer' }}
-                id="review-image"
-              />
-              <p style={{ margin: '8px 0 0', fontSize: '12px', color: '#6c757d' }}>
-                JPG, PNG or WebP — max 3 MB
-              </p>
-            </div>
-
-            {imagePreview && (
-              <div style={{ marginTop: '12px', position: 'relative', display: 'inline-block' }}>
-                <img
-                  src={imagePreview}
-                  alt="Upload preview"
-                  style={{
-                    maxWidth: '100%',
-                    maxHeight: '240px',
-                    borderRadius: '10px',
-                    boxShadow: '0 2px 8px rgba(0,0,0,0.1)',
-                    display: 'block',
-                  }}
-                />
-                <button
-                  type="button"
-                  onClick={() => { setImage(null); setImagePreview(null); }}
-                  style={{
-                    position: 'absolute',
-                    top: '8px',
-                    right: '8px',
-                    background: 'rgba(0,0,0,0.55)',
-                    color: 'white',
-                    border: 'none',
-                    borderRadius: '50%',
-                    width: '26px',
-                    height: '26px',
-                    cursor: 'pointer',
-                    fontSize: '14px',
-                    lineHeight: '26px',
-                    textAlign: 'center',
-                    padding: 0,
-                  }}
-                >
-                  ×
-                </button>
-              </div>
-            )}
-          </div>
-
-          <button
-            type="submit"
-            disabled={isSubmitting || !comment.trim()}
-            style={{
-              gridColumn: '1 / -1',
-              background: isSubmitting || !comment.trim() ? '#adb5bd' : '#667eea',
-              color: 'white',
-              border: 'none',
-              borderRadius: '10px',
-              padding: '14px 28px',
-              fontSize: '15px',
-              fontWeight: 600,
-              cursor: isSubmitting || !comment.trim() ? 'not-allowed' : 'pointer',
-              transition: 'background 0.15s',
-              letterSpacing: '0.2px',
-            }}
-            onMouseOver={(e) => {
-              if (!isSubmitting && comment.trim()) e.currentTarget.style.background = '#5568d3';
-            }}
-            onMouseOut={(e) => {
-              if (!isSubmitting && comment.trim()) e.currentTarget.style.background = '#667eea';
-            }}
-          >
-            {isSubmitting ? 'Submitting...' : 'Submit Review'}
-          </button>
-        </form>
-      </div>
-
-      {/* Existing reviews */}
-      <div style={{ minWidth: 0 }}>
-        <h2 style={{ margin: '0 0 16px', fontSize: '18px', fontWeight: 600, color: '#212529' }}>
-          {isLoading ? 'Loading reviews...' : `${reviews.length} Community Review${reviews.length !== 1 ? 's' : ''}`}
-        </h2>
-
-        {!isLoading && reviews.length === 0 && (
-          <div style={{
-            ...cardStyle,
-            textAlign: 'center',
-            color: '#6c757d',
-            padding: '48px 28px',
-          }}>
-            <p style={{ margin: '0 0 6px', fontSize: '16px', fontWeight: 500 }}>No reviews yet</p>
-            <p style={{ margin: 0, fontSize: '14px' }}>Be the first to share your experience!</p>
-          </div>
-        )}
-
-        <div
-          style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fit, minmax(360px, 1fr))',
-            gap: '20px',
-            alignItems: 'start',
-          }}
-        >
-        {reviews.map((review) => (
-          <div key={review.id} style={cardStyle}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '12px' }}>
-              <StarDisplay rating={review.rating} />
-              <span style={{ fontSize: '12px', color: '#adb5bd', flexShrink: 0, marginLeft: '12px' }}>
-                {new Date(review.created_at).toLocaleDateString('en-GB', {
-                  day: 'numeric',
-                  month: 'short',
-                  year: 'numeric',
-                })}
-              </span>
-            </div>
-
-            <p style={{ margin: '0 0 8px', fontSize: '14px', color: '#212529', lineHeight: 1.65 }}>
-              {review.comment}
-            </p>
-
-            {review.accessibility_notes && (
-              <div style={{
-                background: '#f8f9fa',
-                borderLeft: '3px solid #667eea',
-                borderRadius: '0 6px 6px 0',
-                padding: '8px 12px',
-                fontSize: '13px',
-                color: '#495057',
-                marginTop: '8px',
-              }}>
-                <strong>Accessibility notes:</strong> {review.accessibility_notes}
-              </div>
-            )}
-
-            {review.image_url && (
-              <img
-                src={`${API_BASE_URL}${review.image_url}`}
-                alt="Review photo"
-                style={{
-                  width: '100%',
-                  maxHeight: '320px',
-                  objectFit: 'cover',
-                  borderRadius: '10px',
-                  marginTop: '14px',
-                }}
-              />
-            )}
-          </div>
-        ))}
+    <div className="flex-1 flex flex-col overflow-hidden bg-background">
+      {/* Page header */}
+      <div className="bg-card border-b border-border px-4 py-3 flex items-center gap-3 shrink-0">
+        <Button variant="ghost" size="icon" onClick={() => navigate('/')} aria-label="Back" className="h-8 w-8">
+          <ArrowLeft className="h-4 w-4" />
+        </Button>
+        <div className="flex-1 min-w-0">
+          <p className="text-[11px] font-semibold text-primary uppercase tracking-wider">Community Reviews</p>
+          <h1 className="text-base font-semibold text-foreground truncate">{venueName}</h1>
         </div>
+        <Badge variant="secondary">{reviews.length} review{reviews.length !== 1 ? 's' : ''}</Badge>
       </div>
+
+      <div className="flex-1 overflow-y-auto">
+        <div className="max-w-4xl mx-auto p-4 md:p-6 space-y-6">
+
+          {/* Submission form */}
+          <div className="bg-card border border-border rounded-xl p-5">
+            <h2 className="text-sm font-semibold text-foreground mb-4">Write a Review</h2>
+
+            {successMessage && (
+              <div className="mb-4 px-4 py-3 rounded-lg border border-success/30 bg-success/5 text-success text-sm font-medium">
+                {successMessage}
+              </div>
+            )}
+            {errorMessage && (
+              <div className="mb-4 px-4 py-3 rounded-lg border border-danger/30 bg-danger/5 text-danger text-sm">
+                {errorMessage}
+              </div>
+            )}
+
+            <form onSubmit={handleSubmit} className="space-y-4">
+              {/* Stars */}
+              <div>
+                <Label className="text-xs text-muted-foreground mb-2 block">Accessibility Rating</Label>
+                <div className="flex items-center gap-1">
+                  {[1,2,3,4,5].map(v => (
+                    <button key={v} type="button"
+                      onClick={() => setRating(v)}
+                      onMouseEnter={() => setHoveredRating(v)}
+                      onMouseLeave={() => setHoveredRating(0)}
+                      className="p-0.5 focus:outline-none rounded"
+                      aria-label={`Rate ${v} stars`}
+                    >
+                      <Star className={cn('h-7 w-7 transition-colors', (hoveredRating || rating) >= v ? 'fill-warning text-warning' : 'text-muted-foreground/30')} />
+                    </button>
+                  ))}
+                  {rating > 0 && <span className="ml-2 text-sm text-muted-foreground">{RATING_LABELS[rating - 1]}</span>}
+                </div>
+              </div>
+
+              <div className="grid md:grid-cols-2 gap-4">
+                <div>
+                  <Label htmlFor="comment" className="text-xs text-muted-foreground mb-1.5 block">
+                    Your Review <span className="text-danger">*</span>
+                  </Label>
+                  <Textarea id="comment" value={comment} onChange={e => setComment(e.target.value)}
+                    rows={4} required placeholder="Describe accessibility — entrance, ramps, layout, staff helpfulness..."
+                    className="resize-none text-sm" />
+                </div>
+                <div>
+                  <Label htmlFor="notes" className="text-xs text-muted-foreground mb-1.5 block">Accessibility Notes (optional)</Label>
+                  <Textarea id="notes" value={notes} onChange={e => setNotes(e.target.value)}
+                    rows={4} placeholder="e.g. step at entrance, wide doorways, accessible toilet on ground floor..."
+                    className="resize-none text-sm" />
+                </div>
+              </div>
+
+              {/* Photo upload */}
+              <div>
+                <Label className="text-xs text-muted-foreground mb-1.5 block">Photo (optional)</Label>
+                {imagePreview ? (
+                  <div className="relative inline-block">
+                    <img src={imagePreview} alt="Preview" className="w-28 h-28 object-cover rounded-lg border border-border" />
+                    <button type="button" onClick={() => { setImage(null); setImagePreview(null); }}
+                      className="absolute -top-2 -right-2 h-5 w-5 rounded-full bg-foreground text-background flex items-center justify-center"
+                      aria-label="Remove image">
+                      <X className="h-3 w-3" />
+                    </button>
+                  </div>
+                ) : (
+                  <label className="flex items-center justify-center w-28 h-28 border-2 border-dashed border-border rounded-lg cursor-pointer hover:border-primary/50 transition-colors bg-muted/20">
+                    <input type="file" accept="image/png,image/jpeg,image/webp" onChange={handleImageChange} className="sr-only" />
+                    <div className="text-center">
+                      <Upload className="h-5 w-5 text-muted-foreground mx-auto mb-1" />
+                      <span className="text-[10px] text-muted-foreground">Upload</span>
+                    </div>
+                  </label>
+                )}
+              </div>
+
+              <Button type="submit" disabled={isSubmitting || !comment.trim()} className="w-full">
+                {isSubmitting ? <><Loader2 className="h-4 w-4 animate-spin" />Submitting...</> : 'Submit Review'}
+              </Button>
+            </form>
+          </div>
+
+          {/* Existing reviews */}
+          <div>
+            <h2 className="text-sm font-semibold text-foreground mb-3">
+              {isLoading ? 'Loading reviews...' : `${reviews.length} Community Review${reviews.length !== 1 ? 's' : ''}`}
+            </h2>
+
+            {!isLoading && reviews.length === 0 && (
+              <div className="bg-card border border-border rounded-xl p-10 text-center">
+                <Accessibility className="h-10 w-10 mx-auto mb-3 text-muted-foreground/30" />
+                <p className="text-sm font-medium text-foreground">No reviews yet</p>
+                <p className="text-xs text-muted-foreground mt-1">Be the first to share your experience!</p>
+              </div>
+            )}
+
+            <div className="grid md:grid-cols-2 gap-4">
+              {reviews.map(review => (
+                <div key={review.id} className="bg-card border border-border rounded-xl p-4">
+                  <div className="flex items-start justify-between mb-3">
+                    <div>
+                      <div className="flex items-center gap-0.5 mb-1">
+                        {[1,2,3,4,5].map(v => (
+                          <Star key={v} className={cn('h-4 w-4', review.rating >= v ? 'fill-warning text-warning' : 'text-muted-foreground/20')} />
+                        ))}
+                      </div>
+                      <span className="text-xs text-muted-foreground">{RATING_LABELS[review.rating - 1]}</span>
+                    </div>
+                    <span className="text-[11px] text-muted-foreground shrink-0 ml-3">
+                      {new Date(review.created_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}
+                    </span>
+                  </div>
+                  <p className="text-sm text-foreground leading-relaxed mb-2">{review.comment}</p>
+                  {review.accessibility_notes && (
+                    <div className="bg-muted/50 border-l-2 border-primary rounded-r-lg px-3 py-2 text-xs text-muted-foreground mb-2">
+                      <span className="font-medium text-foreground">Accessibility notes:</span> {review.accessibility_notes}
+                    </div>
+                  )}
+                  {review.image_url && (
+                    <img src={`${API_BASE_URL}${review.image_url}`} alt="Review photo"
+                      className="w-full max-h-48 object-cover rounded-lg mt-2 border border-border" />
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   );

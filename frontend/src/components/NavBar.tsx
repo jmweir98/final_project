@@ -1,55 +1,37 @@
-import React from 'react';
 import { Link, useLocation } from 'react-router-dom';
+import { Accessibility } from 'lucide-react';
+import { Badge } from '@/components/ui/badge';
+import { cn } from '@/lib/utils';
 
 const NavBar: React.FC = () => {
   const location = useLocation();
 
-  const linkStyle = (path: string): React.CSSProperties => ({
-    color: location.pathname === path ? 'white' : 'rgba(255,255,255,0.72)',
-    textDecoration: 'none',
-    fontSize: '15px',
-    fontWeight: location.pathname === path ? 600 : 400,
-    padding: '6px 12px',
-    borderRadius: '6px',
-    background: location.pathname === path ? 'rgba(255,255,255,0.15)' : 'transparent',
-    transition: 'all 0.15s',
-  });
-
   return (
-    <nav style={{
-      background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
-      padding: '0 28px',
-      display: 'flex',
-      alignItems: 'center',
-      height: '58px',
-      boxShadow: '0 2px 12px rgba(0,0,0,0.18)',
-      position: 'sticky',
-      top: 0,
-      zIndex: 1000,
-      flexShrink: 0,
-    }}>
-      <Link to="/" style={{ textDecoration: 'none', display: 'flex', alignItems: 'center', gap: '10px' }}>
-        <span style={{ fontSize: '22px', fontWeight: 700, color: 'white', letterSpacing: '-0.3px' }}>
-          AccessRoute
-        </span>
-        <span style={{
-          fontSize: '11px',
-          fontWeight: 500,
-          color: 'rgba(255,255,255,0.7)',
-          background: 'rgba(255,255,255,0.15)',
-          padding: '2px 8px',
-          borderRadius: '20px',
-          letterSpacing: '0.5px',
-          textTransform: 'uppercase',
-        }}>
-          Belfast
-        </span>
+    <header className="sticky top-0 z-50 h-16 bg-card border-b border-border flex items-center px-5 shrink-0 shadow-sm">
+      <Link to="/" className="flex items-center gap-2.5 no-underline">
+        <div className="h-9 w-9 rounded-lg bg-primary flex items-center justify-center shrink-0">
+          <Accessibility className="h-5 w-5 text-primary-foreground" />
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="font-semibold text-lg text-foreground tracking-tight">AccessRoute</span>
+          <Badge variant="secondary" className="text-xs px-2 h-5">Belfast</Badge>
+        </div>
       </Link>
 
-      <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '4px' }}>
-        <Link to="/" style={linkStyle('/')}>Route Planner</Link>
-      </div>
-    </nav>
+      <nav className="ml-auto flex items-center gap-1">
+        <Link
+          to="/"
+          className={cn(
+            'px-4 py-2 rounded-md text-sm font-medium transition-colors no-underline',
+            location.pathname === '/'
+              ? 'bg-accent text-foreground'
+              : 'text-muted-foreground hover:text-foreground hover:bg-accent'
+          )}
+        >
+          Route Planner
+        </Link>
+      </nav>
+    </header>
   );
 };
 

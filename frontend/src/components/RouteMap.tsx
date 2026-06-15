@@ -1,1608 +1,662 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { MapContainer, TileLayer, Polyline, Marker, Popup, useMapEvents } from 'react-leaflet';
+import { MapContainer, TileLayer, Polyline, Marker, Popup } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
-import L from 'leaflet';
-import { useMap } from 'react-leaflet';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
+import { Navigation, MapPin, Route as RouteIcon, Loader2, AlertTriangle, TrendingUp, RefreshCw } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
+import { ScrollArea } from '@/components/ui/scroll-area';
+import { cn } from '@/lib/utils';
+import { RouteCard } from './RouteCard';
+import { VenueCard } from './VenueCard';
+import { ClickToSetPoints, FitToRoutes, FlyToFocusPoint } from './RouteMapLeaflet';
+import type { GeocodeResult, Review, Route, SavedState, Venue } from './routePlannerTypes';
+import {
+  circleMarkerIcon,
+  formatScoreContext,
+  midpoint,
+  penaltyClass,
+  readSaved,
+  scoreBadgeClass,
+  scoreLevel,
+  wheelchairColor,
+  wheelchairLabel,
+} from './routePlannerHelpers';
 
 const API_BASE_URL = 'http://127.0.0.1:8000';
 const ROUTE_MAP_STATE_KEY = 'routewise.routeMapState';
 
-// ─── Types ──────────────────────────────────────────────────────────────────
 
-type Route = {
-  id: string;
-  geometry: [number, number][];
-  distance_m: number;
-  duration_s: number;
-  elevation_metrics: {
-    ascent_m: number;
-    descent_m: number;
-    max_slope_percent: number;
-    steep_distance_m: { gt5: number; gt8: number };
-  };
-  elevation_profile: Array<{
-    i: number;
-    lat: number;
-    lon: number;
-    elev_m: number;
-    dist_m: number;
-  }>;
-  osm_summary: {
-    steps_count: number;
-    steps_ways?: { osm_id?: number; geometry: [number, number][] }[];
-    surfaces: Record<string, number>;
-    smoothness: Record<string, number>;
-    highway_types: Record<string, number>;
-    kerb_nodes_count: number;
-    unknown_surface_ratio: number;
-    sample_points_used: number;
-  } | null;
-  step_warnings?: { osm_id?: number; lat: number; lon: number; dist_m: number }[];
-  accessibility_score: number;
-  score_breakdown?: {
-    distance_penalty: number;
-    ascent_penalty: number;
-    steep_slope_penalty: number;
-    max_slope_penalty: number;
-    steps_penalty: number;
-    surface_penalty: number;
-    uncertainty_penalty: number;
-    formula: string;
-  };
-  flags: string[];
-};
 
-type Venue = {
-  osm_id: string;
-  name: string;
-  lat: number;
-  lon: number;
-  category: string;
-  wheelchair: string;
-  entrance?: string;
-  tactile_paving?: string;
-  surface?: string;
-  tags: Record<string, string>;
-};
-
-type Review = {
-  id: number;
-  venue_osm_id: string;
-  venue_name: string;
-  rating: number;
-  comment: string;
-  accessibility_notes?: string;
-  image_url?: string | null;
-  created_at: string;
-};
-
-type GeocodeResult = {
-  label: string;
-  lat: number;
-  lon: number;
-  type?: string;
-  importance?: number;
-};
-
-function midpoint(points: [number, number][]): [number, number] | null {
-  if (!points.length) return null;
-  return points[Math.floor(points.length / 2)];
-}
-
-type SavedRouteMapState = {
-  routes: Route[];
-  start: [number, number] | null;
-  end: [number, number] | null;
-  selectedRouteId: string | null;
-  venues: Venue[];
-  selectedVenue: Venue | null;
-  venueReviews: Record<string, Review[]>;
-  startAddress: string;
-  endAddress: string;
-  startLabel: string;
-  endLabel: string;
-};
-
-function readSavedRouteMapState(): SavedRouteMapState | null {
-  try {
-    const raw = window.sessionStorage.getItem(ROUTE_MAP_STATE_KEY);
-    return raw ? (JSON.parse(raw) as SavedRouteMapState) : null;
-  } catch {
-    return null;
-  }
-}
-
-// ─── Score badge ─────────────────────────────────────────────────────────────
-
-function scoreColor(score: number): string {
-  if (score <= 30) return '#28a745';
-  if (score <= 60) return '#fd7e14';
-  return '#dc3545';
-}
-
-function penaltyColor(value: number): string {
-  if (value >= 5) return '#dc3545';
-  if (value >= 2) return '#fd7e14';
-  return '#495057';
-}
-
-function penaltyBackground(value: number): string {
-  if (value >= 5) return '#f8d7da';
-  if (value >= 2) return '#fff3cd';
-  return 'transparent';
-}
-
-function formatScoreContext(route: Route, label: string): string {
-  const osm = route.osm_summary;
-  if (label === 'Distance') return `${(route.distance_m / 1000).toFixed(2)} km`;
-  if (label === 'Ascent') return `${route.elevation_metrics.ascent_m} m ascent`;
-  if (label === 'Steep slope distance') {
-    return `${Math.round(route.elevation_metrics.steep_distance_m.gt8)} m over 8%`;
-  }
-  if (label === 'Maximum slope') {
-    return `${route.elevation_metrics.max_slope_percent.toFixed(1)}% max gradient`;
-  }
-  if (label === 'Steps') return `${osm?.steps_count ?? 0} step section${(osm?.steps_count ?? 0) === 1 ? '' : 's'}`;
-  if (label === 'Rough surface') {
-    const rough = Object.keys(osm?.surfaces ?? {}).filter((surface) =>
-      ['gravel', 'ground', 'dirt', 'mud', 'sand', 'unpaved', 'cobblestone'].includes(surface),
-    );
-    return rough.length ? rough.join(', ') : 'none detected';
-  }
-  if (label === 'Missing surface data') {
-    return `${Math.round((osm?.unknown_surface_ratio ?? 0) * 100)}% unknown`;
-  }
-  return '';
-}
-
-function wheelchairColor(status: string): string {
-  if (status === 'yes') return '#28a745';
-  if (status === 'limited') return '#fd7e14';
-  if (status === 'no') return '#dc3545';
-  return '#6c757d';
-}
-
-function wheelchairLabel(status: string): string {
-  if (status === 'yes') return 'Accessible';
-  if (status === 'limited') return 'Limited access';
-  if (status === 'no') return 'Not accessible';
-  return 'Unknown access';
-}
-
-function circleMarkerIcon(label: string, color: string, size = 30): L.DivIcon {
-  return L.divIcon({
-    className: '',
-    html: `
-      <div style="
-        width:${size}px;
-        height:${size}px;
-        border-radius:50%;
-        background:${color};
-        color:white;
-        border:2px solid white;
-        box-shadow:0 2px 8px rgba(0,0,0,0.35);
-        display:flex;
-        align-items:center;
-        justify-content:center;
-        font-weight:800;
-        font-size:${Math.max(13, Math.round(size * 0.52))}px;
-        line-height:1;
-      ">${label}</div>
-    `,
-    iconSize: [size, size],
-    iconAnchor: [size / 2, size / 2],
-    popupAnchor: [0, -size / 2],
-  });
-}
-
-function venueMarkerIcon(status: string, isSelected: boolean): L.DivIcon {
-  const color = wheelchairColor(status);
-  const markerSymbol = status === 'yes' ? 'A' : status === 'limited' ? 'L' : status === 'no' ? 'N' : '?';
-  const markerSize = isSelected ? 34 : 28;
-  return circleMarkerIcon(markerSymbol, color, markerSize);
-}
-
-// ─── Styles ──────────────────────────────────────────────────────────────────
-
-const s = {
-  container: {
-    display: 'grid',
-    gridTemplateColumns: 'minmax(0, 1fr) minmax(480px, 34vw)',
-    gridTemplateRows: 'auto minmax(0, 1fr)',
-    gap: '12px',
-    padding: '12px',
-    height: 'calc(100vh - 58px)',
-    overflow: 'hidden',
-  } as React.CSSProperties,
-
-  topBar: {
-    gridColumn: '1 / -1',
-    gridRow: 1,
-    background: 'white',
-    borderRadius: '8px',
-    boxShadow: '0 1px 6px rgba(0,0,0,0.07)',
-    padding: '12px',
-    display: 'grid',
-    gridTemplateColumns: 'minmax(260px, 1fr) minmax(260px, 1fr) minmax(220px, 0.85fr) auto',
-    gap: '12px',
-    alignItems: 'start',
-    position: 'relative',
-    zIndex: 800,
-  } as React.CSSProperties,
-
-  sidebar: {
-    display: 'grid',
-    gap: '12px',
-    gridColumn: 2,
-    gridRow: 2,
-    overflowY: 'auto' as const,
-    alignContent: 'start',
-    paddingRight: '6px',
-    paddingBottom: '16px',
-  },
-
-  card: {
-    background: 'white',
-    borderRadius: '8px',
-    padding: '16px',
-    boxShadow: '0 1px 6px rgba(0,0,0,0.07)',
-    flexShrink: 0,
-  } as React.CSSProperties,
-
-  sectionTitle: {
-    fontSize: '15px',
-    fontWeight: 700,
-    marginBottom: '12px',
-    color: '#212529',
-    letterSpacing: '-0.1px',
-  } as React.CSSProperties,
-
-  btn: (color: string, disabled = false): React.CSSProperties => ({
-    background: disabled ? '#adb5bd' : color,
-    color: 'white',
-    border: 'none',
-    borderRadius: '8px',
-    padding: '11px 18px',
-    fontSize: '14px',
-    fontWeight: 600,
-    cursor: disabled ? 'not-allowed' : 'pointer',
-    width: '100%',
-    transition: 'background 0.15s',
-    opacity: disabled ? 0.7 : 1,
-  }),
-
-  routeBtn: (selected: boolean, recommended: boolean): React.CSSProperties => ({
-    background: selected ? '#f0f3ff' : recommended ? '#f0fff4' : 'white',
-    border: `2px solid ${selected ? '#667eea' : recommended ? '#28a745' : '#e9ecef'}`,
-    borderRadius: '10px',
-    padding: '12px',
-    fontSize: '13px',
-    cursor: 'pointer',
-    width: '100%',
-    textAlign: 'left',
-    transition: 'all 0.15s',
-    marginBottom: '8px',
-  }),
-
-  badge: (bg: string, color: string): React.CSSProperties => ({
-    display: 'inline-block',
-    padding: '2px 8px',
-    borderRadius: '20px',
-    fontSize: '11px',
-    fontWeight: 600,
-    background: bg,
-    color,
-    marginLeft: '6px',
-    letterSpacing: '0.2px',
-  }),
-
-  suggestions: {
-    marginTop: '6px',
-    border: '1px solid #dee2e6',
-    borderRadius: '8px',
-    overflow: 'hidden',
-    background: '#fff',
-    boxShadow: '0 3px 10px rgba(0,0,0,0.08)',
-  } as React.CSSProperties,
-
-  suggestionBtn: {
-    width: '100%',
-    border: 'none',
-    borderBottom: '1px solid #f1f3f5',
-    background: '#fff',
-    textAlign: 'left' as const,
-    padding: '9px 10px',
-    fontSize: '12px',
-    color: '#343a40',
-    cursor: 'pointer',
-    lineHeight: 1.35,
-  } as React.CSSProperties,
-
-  mapWrap: {
-    position: 'relative',
-    gridColumn: 1,
-    gridRow: 2,
-    borderRadius: '8px',
-    overflow: 'hidden',
-    boxShadow: '0 1px 8px rgba(0,0,0,0.1)',
-    height: '100%',
-  } as React.CSSProperties,
-};
-
-// ─── Main component ───────────────────────────────────────────────────────────
 
 const RouteMap: React.FC = () => {
   const navigate = useNavigate();
-  const savedStateRef = useRef<SavedRouteMapState | null>(readSavedRouteMapState());
-  const [routes, setRoutes] = useState<Route[]>(() => savedStateRef.current?.routes ?? []);
-  const [start, setStart] = useState<[number, number] | null>(() => savedStateRef.current?.start ?? null);
-  const [end, setEnd] = useState<[number, number] | null>(() => savedStateRef.current?.end ?? null);
+  const saved = useRef<SavedState | null>(readSaved(ROUTE_MAP_STATE_KEY));
+
+  const [routes, setRoutes] = useState<Route[]>(() => saved.current?.routes ?? []);
+  const [start, setStart] = useState<[number, number] | null>(() => saved.current?.start ?? null);
+  const [end, setEnd] = useState<[number, number] | null>(() => saved.current?.end ?? null);
   const [mapFocusPoint, setMapFocusPoint] = useState<[number, number] | null>(null);
-  const [selectedRouteId, setSelectedRouteId] = useState<string | null>(() => savedStateRef.current?.selectedRouteId ?? null);
-  const [isEnriching, setIsEnriching] = useState(false);
+  const [selectedRouteId, setSelectedRouteId] = useState<string | null>(() => saved.current?.selectedRouteId ?? null);
   const [enrichingRouteIds, setEnrichingRouteIds] = useState<Set<string>>(new Set());
-  const [venues, setVenues] = useState<Venue[]>(() => savedStateRef.current?.venues ?? []);
-  const [selectedVenue, setSelectedVenue] = useState<Venue | null>(() => savedStateRef.current?.selectedVenue ?? null);
-  const [venueReviews, setVenueReviews] = useState<Record<string, Review[]>>(() => savedStateRef.current?.venueReviews ?? {});
+  const [venues, setVenues] = useState<Venue[]>(() => saved.current?.venues ?? []);
+  const [selectedVenue, setSelectedVenue] = useState<Venue | null>(() => saved.current?.selectedVenue ?? null);
+  const [venueReviews, setVenueReviews] = useState<Record<string, Review[]>>(() => saved.current?.venueReviews ?? {});
   const [loadingReviewVenueIds, setLoadingReviewVenueIds] = useState<Set<string>>(new Set());
   const [isLoadingVenues, setIsLoadingVenues] = useState(false);
   const [isFindingRoutes, setIsFindingRoutes] = useState(false);
+  const [isEnriching, setIsEnriching] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
-  const [startAddress, setStartAddress] = useState(() => savedStateRef.current?.startAddress ?? '');
-  const [endAddress, setEndAddress] = useState(() => savedStateRef.current?.endAddress ?? '');
+  const [startAddress, setStartAddress] = useState(() => saved.current?.startAddress ?? '');
+  const [endAddress, setEndAddress] = useState(() => saved.current?.endAddress ?? '');
   const [startSuggestions, setStartSuggestions] = useState<GeocodeResult[]>([]);
   const [endSuggestions, setEndSuggestions] = useState<GeocodeResult[]>([]);
-  const [isLoadingStartSuggestions, setIsLoadingStartSuggestions] = useState(false);
-  const [isLoadingEndSuggestions, setIsLoadingEndSuggestions] = useState(false);
-  const [startLabel, setStartLabel] = useState(() => savedStateRef.current?.startLabel ?? '');
-  const [endLabel, setEndLabel] = useState(() => savedStateRef.current?.endLabel ?? '');
-  const routeSearchVersionRef = useRef(0);
-  const selectedVenuePanelRef = useRef<HTMLDivElement | null>(null);
+  const [isLoadingStartSugg, setIsLoadingStartSugg] = useState(false);
+  const [isLoadingEndSugg, setIsLoadingEndSugg] = useState(false);
+  const [startLabel, setStartLabel] = useState(() => saved.current?.startLabel ?? '');
+  const [endLabel, setEndLabel] = useState(() => saved.current?.endLabel ?? '');
+  const [activeTab, setActiveTab] = useState('routes');
   const [isSearchingStart, setIsSearchingStart] = useState(false);
   const [isSearchingEnd, setIsSearchingEnd] = useState(false);
+  const routeVersionRef = useRef(0);
+  const routesRef = useRef<Route[]>([]);
+  const autoEnrichedRouteIdsRef = useRef<Set<string>>(new Set());
+  const enrichmentQueueRunningRef = useRef(false);
+  const venuePanelRef = useRef<HTMLDivElement | null>(null);
 
-  const selectedRoute = routes.find((r) => r.id === selectedRouteId);
-  const isSelectedRouteEnriching = Boolean(
-    selectedRoute && enrichingRouteIds.has(selectedRoute.id),
-  );
-  const showEnrichButton = Boolean(
-    selectedRoute && (!selectedRoute.osm_summary || isSelectedRouteEnriching),
-  );
-  const canEnrich = Boolean(
-    selectedRoute && !selectedRoute.osm_summary && !isSelectedRouteEnriching,
-  );
-  const selectedVenueReviews = selectedVenue ? venueReviews[selectedVenue.osm_id] ?? [] : [];
-  const isSelectedVenueReviewsLoading = Boolean(
-    selectedVenue && loadingReviewVenueIds.has(selectedVenue.osm_id),
-  );
-  const bestRouteId = routes.reduce<string | null>((bestId, route) => {
-    if (!bestId) return route.id;
-    const bestRoute = routes.find((candidate) => candidate.id === bestId);
-    return bestRoute && bestRoute.accessibility_score <= route.accessibility_score ? bestId : route.id;
+  const selectedRoute = routes.find(r => r.id === selectedRouteId);
+  const bestRouteId = routes.reduce<string | null>((b, r) => {
+    if (!b) return r.id;
+    const best = routes.find(c => c.id === b);
+    return best && best.accessibility_score <= r.accessibility_score ? b : r.id;
   }, null);
+  const selectedVenueReviews = selectedVenue ? venueReviews[selectedVenue.osm_id] ?? [] : [];
+  const isVenueReviewsLoading = Boolean(selectedVenue && loadingReviewVenueIds.has(selectedVenue.osm_id));
+  const canEnrich = Boolean(selectedRoute && !selectedRoute.osm_summary && !enrichingRouteIds.has(selectedRoute.id));
+  const showEnrichBtn = Boolean(selectedRoute && (!selectedRoute.osm_summary || enrichingRouteIds.has(selectedRoute.id)));
+
+  // Persist state
+  useEffect(() => {
+    routesRef.current = routes;
+    window.sessionStorage.setItem(ROUTE_MAP_STATE_KEY, JSON.stringify({
+      routes, start, end, selectedRouteId, venues, selectedVenue,
+      venueReviews, startAddress, endAddress, startLabel, endLabel,
+    }));
+  }, [routes, start, end, selectedRouteId, venues, selectedVenue, venueReviews, startAddress, endAddress, startLabel, endLabel]);
+
+  const getCurrentRoutes = (): Route[] => {
+    if (routesRef.current.length) return routesRef.current;
+    try {
+      const raw = window.sessionStorage.getItem(ROUTE_MAP_STATE_KEY);
+      const parsed = raw ? JSON.parse(raw) as SavedState : null;
+      return Array.isArray(parsed?.routes) ? parsed.routes : [];
+    } catch {
+      return [];
+    }
+  };
 
   useEffect(() => {
     if (!selectedVenue) return;
-    window.setTimeout(() => {
-      selectedVenuePanelRef.current?.scrollIntoView({
-        behavior: 'smooth',
-        block: 'start',
-      });
-    }, 50);
+    window.setTimeout(() => venuePanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50);
   }, [selectedVenue?.osm_id]);
 
+  // Autocomplete for start
   useEffect(() => {
-    const state: SavedRouteMapState = {
-      routes,
-      start,
-      end,
-      selectedRouteId,
-      venues,
-      selectedVenue,
-      venueReviews,
-      startAddress,
-      endAddress,
-      startLabel,
-      endLabel,
-    };
-    window.sessionStorage.setItem(ROUTE_MAP_STATE_KEY, JSON.stringify(state));
-  }, [
-    routes,
-    start,
-    end,
-    selectedRouteId,
-    venues,
-    selectedVenue,
-    venueReviews,
-    startAddress,
-    endAddress,
-    startLabel,
-    endLabel,
-  ]);
-
-  useEffect(() => {
-    const query = startAddress.trim();
-    if (query.length < 3 || query === startLabel) {
-      setStartSuggestions([]);
-      setIsLoadingStartSuggestions(false);
-      return;
-    }
-
-    const controller = new AbortController();
-    const timer = window.setTimeout(async () => {
-      setIsLoadingStartSuggestions(true);
+    const q = startAddress.trim();
+    if (q.length < 3 || q === startLabel) { setStartSuggestions([]); return; }
+    const ctrl = new AbortController();
+    const t = window.setTimeout(async () => {
+      setIsLoadingStartSugg(true);
       try {
-        const res = await fetch(`${API_BASE_URL}/geocode/search?q=${encodeURIComponent(query)}`, {
-          signal: controller.signal,
-        });
-        if (!res.ok) return;
-        const data = await res.json();
-        setStartSuggestions(Array.isArray(data?.results) ? data.results.slice(0, 5) : []);
-      } catch {
-        if (!controller.signal.aborted) setStartSuggestions([]);
-      } finally {
-        if (!controller.signal.aborted) setIsLoadingStartSuggestions(false);
-      }
+        const res = await fetch(`${API_BASE_URL}/geocode/search?q=${encodeURIComponent(q)}`, { signal: ctrl.signal });
+        if (res.ok) { const d = await res.json(); setStartSuggestions(Array.isArray(d?.results) ? d.results.slice(0, 5) : []); }
+      } catch { if (!ctrl.signal.aborted) setStartSuggestions([]); }
+      finally { if (!ctrl.signal.aborted) setIsLoadingStartSugg(false); }
     }, 350);
-
-    return () => {
-      window.clearTimeout(timer);
-      controller.abort();
-    };
+    return () => { window.clearTimeout(t); ctrl.abort(); };
   }, [startAddress, startLabel]);
 
+  // Autocomplete for end
   useEffect(() => {
-    const query = endAddress.trim();
-    if (query.length < 3 || query === endLabel) {
-      setEndSuggestions([]);
-      setIsLoadingEndSuggestions(false);
-      return;
-    }
-
-    const controller = new AbortController();
-    const timer = window.setTimeout(async () => {
-      setIsLoadingEndSuggestions(true);
+    const q = endAddress.trim();
+    if (q.length < 3 || q === endLabel) { setEndSuggestions([]); return; }
+    const ctrl = new AbortController();
+    const t = window.setTimeout(async () => {
+      setIsLoadingEndSugg(true);
       try {
-        const res = await fetch(`${API_BASE_URL}/geocode/search?q=${encodeURIComponent(query)}`, {
-          signal: controller.signal,
-        });
-        if (!res.ok) return;
-        const data = await res.json();
-        setEndSuggestions(Array.isArray(data?.results) ? data.results.slice(0, 5) : []);
-      } catch {
-        if (!controller.signal.aborted) setEndSuggestions([]);
-      } finally {
-        if (!controller.signal.aborted) setIsLoadingEndSuggestions(false);
-      }
+        const res = await fetch(`${API_BASE_URL}/geocode/search?q=${encodeURIComponent(q)}`, { signal: ctrl.signal });
+        if (res.ok) { const d = await res.json(); setEndSuggestions(Array.isArray(d?.results) ? d.results.slice(0, 5) : []); }
+      } catch { if (!ctrl.signal.aborted) setEndSuggestions([]); }
+      finally { if (!ctrl.signal.aborted) setIsLoadingEndSugg(false); }
     }, 350);
-
-    return () => {
-      window.clearTimeout(timer);
-      controller.abort();
-    };
+    return () => { window.clearTimeout(t); ctrl.abort(); };
   }, [endAddress, endLabel]);
 
-  const getVenueSearchPoint = (): [number, number] | null => {
-    if (selectedRoute?.geometry?.length) {
-      return selectedRoute.geometry[Math.floor(selectedRoute.geometry.length / 2)];
-    }
-    return end ?? start;
+  const clearDerived = () => {
+    routeVersionRef.current += 1;
+    autoEnrichedRouteIdsRef.current = new Set();
+    enrichmentQueueRunningRef.current = false;
+    setRoutes([]); setSelectedRouteId(null); setVenues([]); setSelectedVenue(null);
+    setVenueReviews({}); setLoadingReviewVenueIds(new Set()); setEnrichingRouteIds(new Set());
+  };
+
+  const applyGeocode = (kind: 'start' | 'end', result: GeocodeResult) => {
+    const pt: [number, number] = [result.lat, result.lon];
+    setMapFocusPoint(pt);
+    if (kind === 'start') { setStart(pt); setStartAddress(result.label); setStartLabel(result.label); setStartSuggestions([]); }
+    else { setEnd(pt); setEndAddress(result.label); setEndLabel(result.label); setEndSuggestions([]); }
+    clearDerived();
+  };
+
+  const searchAddress = async (kind: 'start' | 'end') => {
+    const q = kind === 'start' ? startAddress : endAddress;
+    if (q.trim().length < 3) { setErrorMessage('Enter at least 3 characters.'); return; }
+    const setLoading = kind === 'start' ? setIsSearchingStart : setIsSearchingEnd;
+    setLoading(true); setErrorMessage('');
+    try {
+      const res = await fetch(`${API_BASE_URL}/geocode/search?q=${encodeURIComponent(q)}`);
+      if (!res.ok) { setErrorMessage(`Search failed (${res.status})`); return; }
+      const d = await res.json();
+      const results: GeocodeResult[] = Array.isArray(d?.results) ? d.results : [];
+      if (!results.length) { setErrorMessage(`No address found for "${q}"`); return; }
+      applyGeocode(kind, results[0]);
+    } catch { setErrorMessage('Address search failed — backend unreachable.'); }
+    finally { setLoading(false); }
+  };
+
+  const handleAddressEnter = (kind: 'start' | 'end') => {
+    const q = kind === 'start' ? startAddress.trim() : endAddress.trim();
+    const lbl = kind === 'start' ? startLabel : endLabel;
+    if (start && end && (!q || q === lbl)) { void fetchRoutes(); return; }
+    void searchAddress(kind);
   };
 
   const loadVenueReviews = async (venueId: string) => {
     if (venueReviews[venueId] || loadingReviewVenueIds.has(venueId)) return;
-
-    setLoadingReviewVenueIds((prev) => new Set(prev).add(venueId));
+    setLoadingReviewVenueIds(p => new Set(p).add(venueId));
     try {
       const res = await fetch(`${API_BASE_URL}/venues/${encodeURIComponent(venueId)}/reviews`);
-      if (!res.ok) return;
-      const data = await res.json();
-      const reviews: Review[] = Array.isArray(data?.reviews) ? data.reviews : [];
-      setVenueReviews((prev) => ({ ...prev, [venueId]: reviews }));
-    } catch {
-      // Reviews are supporting data, so the map remains usable if this lookup fails.
-    } finally {
-      setLoadingReviewVenueIds((prev) => {
-        const next = new Set(prev);
-        next.delete(venueId);
-        return next;
-      });
-    }
+      if (res.ok) { const d = await res.json(); setVenueReviews(p => ({ ...p, [venueId]: d?.reviews ?? [] })); }
+    } catch { /* silent */ }
+    finally { setLoadingReviewVenueIds(p => { const n = new Set(p); n.delete(venueId); return n; }); }
   };
 
-  const loadReviewsForVenues = (venuesToLoad: Venue[]) => {
-    venuesToLoad.forEach((venue, index) => {
-      window.setTimeout(() => {
-        void loadVenueReviews(venue.osm_id);
-      }, index * 100);
-    });
-  };
+  const selectVenue = (v: Venue) => { setSelectedVenue(v); void loadVenueReviews(v.osm_id); };
 
-  const selectVenue = (venue: Venue) => {
-    setSelectedVenue(venue);
-    void loadVenueReviews(venue.osm_id);
-  };
-
-  const clearRouteDerivedState = () => {
-    routeSearchVersionRef.current += 1;
-    setRoutes([]);
-    setSelectedRouteId(null);
-    setVenues([]);
-    setSelectedVenue(null);
-    setVenueReviews({});
-    setLoadingReviewVenueIds(new Set());
-    setEnrichingRouteIds(new Set());
-  };
-
-  const enrichRoute = async (
-    route: Route,
-    showErrors = false,
-    routeSearchVersion = routeSearchVersionRef.current,
-  ) => {
-    if (route.osm_summary) return;
-    if (routeSearchVersion !== routeSearchVersionRef.current) return;
-
-    setEnrichingRouteIds((prev) => new Set(prev).add(route.id));
+  const enrichRoute = async (route: Route, showErr = false, ver = routeVersionRef.current, attempts = 1) => {
+    if (route.osm_summary || ver !== routeVersionRef.current) return;
+    setEnrichingRouteIds(p => new Set(p).add(route.id));
     try {
-      const res = await fetch(`${API_BASE_URL}/route/enrich`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          geometry: route.geometry,
-          distance_m: route.distance_m,
-          elevation_metrics: route.elevation_metrics,
-        }),
-      });
-      if (!res.ok) {
-        if (showErrors) setErrorMessage(`Enrich failed: ${await res.text()}`);
-        return;
+      for (let attempt = 1; attempt <= attempts; attempt += 1) {
+        const res = await fetch(`${API_BASE_URL}/route/enrich`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ geometry: route.geometry, distance_m: route.distance_m, elevation_metrics: route.elevation_metrics }),
+        });
+        if (res.ok) {
+          const d = await res.json();
+          if (ver !== routeVersionRef.current) return;
+          setRoutes(p => p.map(x => x.id === route.id ? { ...x, osm_summary: d.osm_summary ?? x.osm_summary, accessibility_score: d.accessibility_score ?? x.accessibility_score, score_breakdown: d.score_breakdown ?? x.score_breakdown, flags: d.flags ?? x.flags } : x).sort((a, b) => a.accessibility_score - b.accessibility_score));
+          return;
+        }
+        if (attempt === attempts) {
+          if (showErr) setErrorMessage(`Enrich failed: ${await res.text()}`);
+          return;
+        }
+        await new Promise(resolve => window.setTimeout(resolve, 1500 * attempt));
+        if (ver !== routeVersionRef.current) return;
       }
-      const data = await res.json();
-      if (routeSearchVersion !== routeSearchVersionRef.current) return;
-      setRoutes((prev) =>
-        prev
-          .map((x) =>
-            x.id === route.id
-              ? {
-                  ...x,
-                  osm_summary: data.osm_summary ?? x.osm_summary,
-                  accessibility_score: data.accessibility_score ?? x.accessibility_score,
-                  score_breakdown: data.score_breakdown ?? x.score_breakdown,
-                  flags: data.flags ?? x.flags,
-                }
-              : x,
-          )
-          .sort((a, b) => a.accessibility_score - b.accessibility_score),
-      );
-    } catch {
-      if (showErrors) setErrorMessage('Enrich failed - backend unreachable.');
-    } finally {
-      if (routeSearchVersion !== routeSearchVersionRef.current) return;
-      setEnrichingRouteIds((prev) => {
-        const next = new Set(prev);
-        next.delete(route.id);
-        return next;
-      });
-    }
-  };
-
-  const enrichRoutesInBackground = (routesToEnrich: Route[], routeSearchVersion: number) => {
-    routesToEnrich.forEach((route, index) => {
-      window.setTimeout(() => {
-        void enrichRoute(route, false, routeSearchVersion);
-      }, index * 300);
-    });
-  };
-
-  const applyAddressResult = (kind: 'start' | 'end', result: GeocodeResult) => {
-    const point: [number, number] = [result.lat, result.lon];
-    setMapFocusPoint(point);
-    if (kind === 'start') {
-      setStart(point);
-      setStartAddress(result.label);
-      setStartLabel(result.label);
-      setStartSuggestions([]);
-    } else {
-      setEnd(point);
-      setEndAddress(result.label);
-      setEndLabel(result.label);
-      setEndSuggestions([]);
-    }
-    clearRouteDerivedState();
-  };
-
-  const searchAddress = async (kind: 'start' | 'end') => {
-    const query = kind === 'start' ? startAddress : endAddress;
-    if (query.trim().length < 3) {
-      setErrorMessage('Enter at least 3 characters to search for an address.');
-      return;
-    }
-
-    const setLoading = kind === 'start' ? setIsSearchingStart : setIsSearchingEnd;
-    setLoading(true);
-    setErrorMessage('');
-    try {
-      const res = await fetch(`${API_BASE_URL}/geocode/search?q=${encodeURIComponent(query)}`);
-      if (!res.ok) {
-        const errData = await res.json().catch(() => null);
-        const detail = errData?.detail ?? `HTTP ${res.status}`;
-        setErrorMessage(`Address search failed: ${detail}`);
-        return;
-      }
-
-      const data = await res.json();
-      const results: GeocodeResult[] = Array.isArray(data?.results) ? data.results : [];
-      if (results.length === 0) {
-        setErrorMessage(`No address found for "${query}". Try a more specific search.`);
-        return;
-      }
-
-      applyAddressResult(kind, results[0]);
-    } catch {
-      setErrorMessage('Address search failed - backend unreachable.');
-    } finally {
-      setLoading(false);
+    } catch { if (showErr) setErrorMessage('Enrich failed — backend unreachable.'); }
+    finally {
+      if (ver !== routeVersionRef.current) return;
+      setEnrichingRouteIds(p => { const n = new Set(p); n.delete(route.id); return n; });
     }
   };
 
   const fetchRoutes = async () => {
-    if (!start || !end) {
-      setErrorMessage('Click the map to set a start point, then click again to set an end point.');
-      return;
-    }
-    setErrorMessage('');
-    setIsFindingRoutes(true);
-    const routeSearchVersion = routeSearchVersionRef.current + 1;
-    routeSearchVersionRef.current = routeSearchVersion;
+    if (!start || !end) { setErrorMessage('Set start and end points first.'); return; }
+    setErrorMessage(''); setIsFindingRoutes(true);
+    const ver = routeVersionRef.current + 1; routeVersionRef.current = ver;
+    autoEnrichedRouteIdsRef.current = new Set();
     setEnrichingRouteIds(new Set());
     try {
       const res = await fetch(`${API_BASE_URL}/routes/compare`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          start: { lat: start[0], lon: start[1] },
-          end: { lat: end[0], lon: end[1] },
-        }),
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ start: { lat: start[0], lon: start[1] }, end: { lat: end[0], lon: end[1] } }),
       });
-      if (!res.ok) {
-        const errData = await res.json().catch(() => null);
-        const detail = errData?.detail ?? `HTTP ${res.status}`;
-        setErrorMessage(`Could not find routes: ${detail}`);
-        return;
-      }
-      const data = await res.json();
-      const loaded: Route[] = Array.isArray(data?.routes) ? data.routes : [];
-      const sorted = [...loaded].sort((a, b) => a.accessibility_score - b.accessibility_score);
-      setRoutes(sorted);
-      setSelectedRouteId(sorted[0]?.id ?? null);
-      setVenues([]);
-      setSelectedVenue(null);
-      setVenueReviews({});
-      setLoadingReviewVenueIds(new Set());
-      enrichRoutesInBackground(
-        sorted.filter((route) => !route.osm_summary),
-        routeSearchVersion,
-      );
-    } catch {
-      setErrorMessage('Could not reach the backend — make sure it is running on port 8000.');
-    } finally {
-      setIsFindingRoutes(false);
-    }
+      if (!res.ok) { const e = await res.json().catch(() => null); setErrorMessage(`Could not find routes: ${e?.detail ?? `HTTP ${res.status}`}`); return; }
+      const d = await res.json();
+      const sorted = (Array.isArray(d?.routes) ? d.routes as Route[] : []).sort((a, b) => a.accessibility_score - b.accessibility_score);
+      setRoutes(sorted); setSelectedRouteId(sorted[0]?.id ?? null);
+      setVenues([]); setSelectedVenue(null); setVenueReviews({}); setLoadingReviewVenueIds(new Set());
+      setActiveTab('routes');
+    } catch { setErrorMessage('Could not reach the backend — make sure it is running on port 8000.'); }
+    finally { setIsFindingRoutes(false); }
   };
 
   const enrichSelectedRoute = async () => {
-    if (!selectedRouteId) return;
-    const r = routes.find((x) => x.id === selectedRouteId);
-    if (!r || r.osm_summary) return;
-
+    if (!selectedRoute || selectedRoute.osm_summary) return;
     setIsEnriching(true);
-    try {
-      await enrichRoute(r, true);
-    } finally {
-      setIsEnriching(false);
-    }
+    try { await enrichRoute(selectedRoute, true); } finally { setIsEnriching(false); }
   };
 
   const loadNearbyVenues = async () => {
-    const point = getVenueSearchPoint();
-    if (!point) {
-      setErrorMessage('Select a route or click the map first.');
-      return;
-    }
-    setIsLoadingVenues(true);
-    setErrorMessage('');
+    const pt = selectedRoute?.geometry?.length ? selectedRoute.geometry[Math.floor(selectedRoute.geometry.length / 2)] : end ?? start;
+    if (!pt) { setErrorMessage('Select a route first.'); return; }
+    setIsLoadingVenues(true); setErrorMessage('');
     try {
-      const res = await fetch(
-        `${API_BASE_URL}/venues/nearby?lat=${point[0]}&lon=${point[1]}&radius_m=350`,
-      );
-      if (!res.ok) {
-        setErrorMessage(`Venue lookup failed (${res.status}).`);
-        return;
-      }
-      const data = await res.json();
-      const loaded: Venue[] = Array.isArray(data?.venues) ? data.venues : [];
-      setVenueReviews({});
-      setLoadingReviewVenueIds(new Set());
-      setVenues(loaded);
+      const res = await fetch(`${API_BASE_URL}/venues/nearby?lat=${pt[0]}&lon=${pt[1]}&radius_m=350`);
+      if (!res.ok) { setErrorMessage(`Venue lookup failed (${res.status})`); return; }
+      const d = await res.json();
+      const loaded: Venue[] = Array.isArray(d?.venues) ? d.venues : [];
+      setVenueReviews({}); setLoadingReviewVenueIds(new Set()); setVenues(loaded);
       if (loaded.length > 0) selectVenue(loaded[0]);
-      loadReviewsForVenues(loaded);
-    } catch {
-      setErrorMessage('Venue lookup failed — backend unreachable.');
-    } finally {
-      setIsLoadingVenues(false);
-    }
+      loaded.forEach((v, i) => window.setTimeout(() => void loadVenueReviews(v.osm_id), i * 100));
+      setActiveTab('venues');
+    } catch { setErrorMessage('Venue lookup failed — backend unreachable.'); }
+    finally { setIsLoadingVenues(false); }
   };
-
-  const pointsSet = Boolean(start && end);
-  const step = !start ? 1 : !end ? 2 : 3;
-
-  const handleAddressEnter = (kind: 'start' | 'end') => {
-    const query = kind === 'start' ? startAddress.trim() : endAddress.trim();
-    const selectedLabel = kind === 'start' ? startLabel : endLabel;
-
-    if (pointsSet && (!query || query === selectedLabel)) {
-      void fetchRoutes();
-      return;
-    }
-
-    void searchAddress(kind);
-  };
-
-  const addressSearchPanel = (
-    <>
-      <label style={{ fontSize: '13px', color: '#495057', fontWeight: 700 }}>
-        From
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 92px', gap: '8px', marginTop: '5px' }}>
-          <input
-            data-address-kind="start"
-            value={startAddress}
-            onChange={(e) => {
-              setStartAddress(e.target.value);
-              setStartLabel('');
-            }}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') {
-                e.preventDefault();
-                handleAddressEnter('start');
-              }
-            }}
-            placeholder="e.g. Belfast City Hall"
-            style={{ padding: '10px', border: '1px solid #ced4da', borderRadius: '8px', fontSize: '13px' }}
-          />
-          <button
-            onClick={() => searchAddress('start')}
-            disabled={isSearchingStart}
-            style={s.btn('#198754', isSearchingStart)}
-          >
-            {isSearchingStart ? '...' : 'Set'}
-          </button>
-        </div>
-        {(isLoadingStartSuggestions || startSuggestions.length > 0) && (
-          <div style={s.suggestions}>
-            {isLoadingStartSuggestions && startSuggestions.length === 0 && (
-              <div style={{ padding: '9px 10px', fontSize: '12px', color: '#6c757d' }}>
-                Searching...
-              </div>
-            )}
-            {startSuggestions.map((result) => (
-              <button
-                key={`${result.lat},${result.lon},${result.label}`}
-                type="button"
-                onClick={() => applyAddressResult('start', result)}
-                style={s.suggestionBtn}
-                onMouseOver={(e) => (e.currentTarget.style.background = '#f8f9fa')}
-                onMouseOut={(e) => (e.currentTarget.style.background = '#fff')}
-              >
-                {result.label}
-              </button>
-            ))}
-          </div>
-        )}
-      </label>
-
-      <label style={{ fontSize: '13px', color: '#495057', fontWeight: 700 }}>
-        To
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 92px', gap: '8px', marginTop: '5px' }}>
-          <input
-            data-address-kind="end"
-            value={endAddress}
-            onChange={(e) => {
-              setEndAddress(e.target.value);
-              setEndLabel('');
-            }}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') {
-                e.preventDefault();
-                handleAddressEnter('end');
-              }
-            }}
-            placeholder="e.g. St Anne's Cathedral"
-            style={{ padding: '10px', border: '1px solid #ced4da', borderRadius: '8px', fontSize: '13px' }}
-          />
-          <button
-            onClick={() => searchAddress('end')}
-            disabled={isSearchingEnd}
-            style={s.btn('#dc3545', isSearchingEnd)}
-          >
-            {isSearchingEnd ? '...' : 'Set'}
-          </button>
-        </div>
-        {(isLoadingEndSuggestions || endSuggestions.length > 0) && (
-          <div style={s.suggestions}>
-            {isLoadingEndSuggestions && endSuggestions.length === 0 && (
-              <div style={{ padding: '9px 10px', fontSize: '12px', color: '#6c757d' }}>
-                Searching...
-              </div>
-            )}
-            {endSuggestions.map((result) => (
-              <button
-                key={`${result.lat},${result.lon},${result.label}`}
-                type="button"
-                onClick={() => applyAddressResult('end', result)}
-                style={s.suggestionBtn}
-                onMouseOver={(e) => (e.currentTarget.style.background = '#f8f9fa')}
-                onMouseOut={(e) => (e.currentTarget.style.background = '#fff')}
-              >
-                {result.label}
-              </button>
-            ))}
-          </div>
-        )}
-      </label>
-    </>
-  );
-
-  const pointSummaryPanel = (
-    <div style={{ fontSize: '12px', color: '#495057', lineHeight: 1.45 }}>
-      <div style={{ fontWeight: 800, color: '#212529', marginBottom: '4px' }}>Selected Points</div>
-      <div>
-        <strong>Start:</strong>{' '}
-        {start ? startLabel || `${start[0].toFixed(5)}, ${start[1].toFixed(5)}` : <em style={{ color: '#adb5bd' }}>not set</em>}
-      </div>
-      <div>
-        <strong>End:</strong>{' '}
-        {end ? endLabel || `${end[0].toFixed(5)}, ${end[1].toFixed(5)}` : <em style={{ color: '#adb5bd' }}>not set</em>}
-      </div>
-      {errorMessage && (
-        <div style={{ color: '#856404', marginTop: '4px', fontWeight: 600 }}>
-          {errorMessage}
-        </div>
-      )}
-    </div>
-  );
-
-  const actionPanel = (
-    <div style={{ display: 'grid', gap: '8px', minWidth: '170px' }}>
-      <button
-        onClick={fetchRoutes}
-        disabled={isFindingRoutes}
-        style={s.btn('#667eea', isFindingRoutes)}
-        onMouseOver={(e) => { if (!isFindingRoutes) e.currentTarget.style.background = '#5568d3'; }}
-        onMouseOut={(e) => { if (!isFindingRoutes) e.currentTarget.style.background = '#667eea'; }}
-      >
-        {isFindingRoutes ? 'Finding...' : 'Find Routes'}
-      </button>
-      {showEnrichButton && (
-        <button
-          onClick={enrichSelectedRoute}
-          disabled={!canEnrich}
-          style={s.btn('#28a745', !canEnrich)}
-          onMouseOver={(e) => { if (canEnrich) e.currentTarget.style.background = '#218838'; }}
-          onMouseOut={(e) => { if (canEnrich) e.currentTarget.style.background = '#28a745'; }}
-        >
-          {isEnriching || isSelectedRouteEnriching ? 'Loading OSM...' : 'Retry OSM'}
-        </button>
-      )}
-      <button
-        onClick={loadNearbyVenues}
-        disabled={isLoadingVenues || (!selectedRoute && !start && !end)}
-        style={s.btn('#0d6efd', isLoadingVenues || (!selectedRoute && !start && !end))}
-        onMouseOver={(e) => { if (!isLoadingVenues) e.currentTarget.style.background = '#0b5ed7'; }}
-        onMouseOut={(e) => { if (!isLoadingVenues) e.currentTarget.style.background = '#0d6efd'; }}
-      >
-        {isLoadingVenues ? 'Loading Venues...' : 'Load Venues'}
-      </button>
-    </div>
-  );
 
   useEffect(() => {
-    const handleEnterToFindRoutes = (event: KeyboardEvent) => {
-      if (
-        event.key !== 'Enter' ||
-        event.defaultPrevented ||
-        event.altKey ||
-        event.ctrlKey ||
-        event.metaKey ||
-        event.shiftKey ||
-        !start ||
-        !end ||
-        isFindingRoutes
-      ) {
-        return;
+    if (!routes.length || isFindingRoutes || enrichmentQueueRunningRef.current) return;
+    const ver = routeVersionRef.current;
+    enrichmentQueueRunningRef.current = true;
+
+    const runQueue = async () => {
+      await new Promise(resolve => window.setTimeout(resolve, 400));
+      while (ver === routeVersionRef.current) {
+        const currentRoutes = getCurrentRoutes()
+          .slice()
+          .sort((a, b) => a.accessibility_score - b.accessibility_score);
+        const next = currentRoutes.find(route => {
+          const key = `${ver}:${route.id}`;
+          return !route.osm_summary && !autoEnrichedRouteIdsRef.current.has(key);
+        });
+        if (!next) break;
+        autoEnrichedRouteIdsRef.current.add(`${ver}:${next.id}`);
+        await enrichRoute(next, false, ver, 3);
+        await new Promise(resolve => window.setTimeout(resolve, 800));
       }
-
-      const target = event.target as HTMLElement | null;
-      const tagName = target?.tagName.toLowerCase();
-      if (tagName === 'textarea' || tagName === 'button') return;
-
-      if (target instanceof HTMLInputElement) {
-        const query = target.value.trim();
-        const addressKind = target.dataset.addressKind;
-        const selectedLabel = addressKind === 'start' ? startLabel : addressKind === 'end' ? endLabel : '';
-        if (query && query !== selectedLabel) return;
-      }
-
-      event.preventDefault();
-      void fetchRoutes();
+      if (ver === routeVersionRef.current) enrichmentQueueRunningRef.current = false;
     };
 
-    window.addEventListener('keydown', handleEnterToFindRoutes);
-    return () => window.removeEventListener('keydown', handleEnterToFindRoutes);
+    void runQueue();
+    return () => { if (ver === routeVersionRef.current) enrichmentQueueRunningRef.current = false; };
+  }, [routes.length, isFindingRoutes]);
+
+  // Enter key shortcut
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key !== 'Enter' || e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+      if (!start || !end || isFindingRoutes) return;
+      const target = e.target as HTMLElement;
+      if (target.tagName.toLowerCase() === 'textarea' || target.tagName.toLowerCase() === 'button') return;
+      if (target instanceof HTMLInputElement) {
+        const q = target.value.trim();
+        const lbl = target.dataset.addressKind === 'start' ? startLabel : endLabel;
+        if (q && q !== lbl) return;
+      }
+      e.preventDefault(); void fetchRoutes();
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
   }, [start, end, startLabel, endLabel, isFindingRoutes]);
 
-  return (
-    <div style={s.container}>
-      <div style={s.topBar}>
-        {addressSearchPanel}
-        {pointSummaryPanel}
-        {actionPanel}
-      </div>
-      {/* ── Sidebar ── */}
-      <div style={s.sidebar}>
+  // ─── Panels ───────────────────────────────────────────────────────────────
 
-        {/* Route list */}
-        <div style={s.card}>
-          <div style={s.sectionTitle}>Available Routes</div>
-          {routes.length === 0 ? (
-            <div style={{ color: '#adb5bd', fontSize: '13px' }}>
-              No routes yet — set your points and click Find Routes.
-            </div>
-          ) : (
-            routes.map((r) => {
-              const isSelected = r.id === selectedRouteId;
-              const isRecommended = r.id === bestRouteId;
-              const hasSteps = (r.osm_summary?.steps_count ?? 0) > 0;
-              const sc = r.accessibility_score;
+  const routesPanel = (
+    <div className="p-3 space-y-2">
+      {routes.length === 0 ? (
+        <div className="flex flex-col items-center justify-center py-12 text-center">
+          <RouteIcon className="h-10 w-10 text-muted-foreground/30 mb-3" />
+          <p className="text-sm text-muted-foreground">No routes yet</p>
+          <p className="text-xs text-muted-foreground/70 mt-1">Set start &amp; end, then click Find Routes</p>
+        </div>
+      ) : (
+        routes.map(route => (
+          <RouteCard
+            key={route.id}
+            route={route}
+            isSelected={route.id === selectedRouteId}
+            isBest={route.id === bestRouteId}
+            isEnriching={enrichingRouteIds.has(route.id)}
+            onPreview={() => setSelectedRouteId(route.id)}
+            onSelect={() => { setSelectedRouteId(route.id); setActiveTab('details'); }}
+          />
+        ))
+      )}
+    </div>
+  );
 
-              return (
-                <div key={r.id}>
-                  <button
-                    onClick={() => setSelectedRouteId(r.id)}
-                    style={s.routeBtn(isSelected, isRecommended && !isSelected)}
-                  >
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
-                      <strong style={{ fontSize: '14px' }}>{r.id}</strong>
-                      <div>
-                        {isRecommended && (
-                          <span style={s.badge('#d4edda', '#155724')}>Best</span>
-                        )}
-                        {hasSteps && (
-                          <span style={s.badge('#fff3cd', '#856404')}>Steps</span>
-                        )}
-                        <span style={s.badge(`${scoreColor(sc)}22`, scoreColor(sc))}>
-                          Score {sc}
-                        </span>
-                      </div>
-                    </div>
-                    <div style={{ fontSize: '12px', color: '#6c757d', display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: '6px' }}>
-                      <span>{(r.distance_m / 1000).toFixed(2)} km</span>
-                      <span>{(r.duration_s / 60).toFixed(0)} min</span>
-                      <span>{r.elevation_metrics?.ascent_m || 0}m ascent</span>
-                      <span>Steps: {r.osm_summary ? r.osm_summary.steps_count : '—'}</span>
-                    </div>
-                    {!r.osm_summary && (
-                      <div style={{ fontSize: '11px', color: '#adb5bd', marginTop: '4px' }}>
-                        {enrichingRouteIds.has(r.id) ? 'Loading OSM data...' : 'OSM data not loaded'}
-                      </div>
-                    )}
-                  </button>
-                  {r.flags && r.flags.length > 0 && (
-                    <div style={{ fontSize: '11px', color: '#856404', marginLeft: '12px', marginBottom: '8px', marginTop: '-4px' }}>
-                      {r.flags.join(', ')}
-                    </div>
-                  )}
+  const detailsPanel = selectedRoute ? (
+    <div className="p-3 space-y-3">
+      {/* Elevation */}
+      {selectedRoute.elevation_profile?.length > 0 && (
+        <div className="border border-border rounded-xl p-3 bg-card">
+          <h4 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide mb-2 flex items-center gap-1.5">
+            <TrendingUp className="h-3.5 w-3.5" />Elevation Profile
+          </h4>
+          <ResponsiveContainer width="100%" height={120}>
+            <LineChart data={selectedRoute.elevation_profile}>
+              <CartesianGrid strokeDasharray="3 3" stroke="oklch(0.922 0 0)" />
+              <XAxis dataKey="dist_m" tick={{ fontSize: 10 }} />
+              <YAxis dataKey="elev_m" tick={{ fontSize: 10 }} width={32} />
+              <Tooltip contentStyle={{ fontSize: '11px', borderRadius: '8px' }} formatter={(v: unknown) => [`${(v as number).toFixed(1)}m`, 'Elev']} labelFormatter={v => `${v}m along`} />
+              <Line type="monotone" dataKey="elev_m" stroke="oklch(0.205 0 0)" strokeWidth={2} dot={false} />
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+      )}
+
+      {/* Score breakdown */}
+      {selectedRoute.score_breakdown && (
+        <div className="border border-border rounded-xl p-3 bg-card">
+          <div className="flex items-center justify-between mb-3">
+            <h4 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide">Score Breakdown</h4>
+            <span className={cn('text-base font-bold px-2.5 py-1 rounded-md border', scoreBadgeClass(scoreLevel(selectedRoute.accessibility_score)))}>
+              {selectedRoute.accessibility_score} total
+            </span>
+          </div>
+          <div className="space-y-1">
+            {([
+              ['Distance', selectedRoute.score_breakdown.distance_penalty],
+              ['Ascent', selectedRoute.score_breakdown.ascent_penalty],
+              ['Steep slope', selectedRoute.score_breakdown.steep_slope_penalty],
+              ['Max slope', selectedRoute.score_breakdown.max_slope_penalty],
+              ['Steps', selectedRoute.score_breakdown.steps_penalty],
+              ['Rough surface', selectedRoute.score_breakdown.surface_penalty],
+              ['Missing data', selectedRoute.score_breakdown.uncertainty_penalty],
+            ] as [string, number][]).map(([label, val]) => (
+              <div key={label} className="flex items-center justify-between text-sm py-1">
+                <span className="text-foreground">{label}</span>
+                <div className="flex items-center gap-3">
+                  <span className="text-muted-foreground text-xs">{formatScoreContext(selectedRoute, label)}</span>
+                  <span className={cn('w-8 text-right', penaltyClass(val))}>+{val}</span>
                 </div>
-              );
-            })
-          )}
+              </div>
+            ))}
+          </div>
+          <p className="text-xs text-muted-foreground mt-2">Lower is better. Amber/red = highest penalty factors.</p>
+        </div>
+      )}
+
+      {/* Surface details */}
+      {selectedRoute.osm_summary && (
+        <div className="border border-border rounded-xl p-3 bg-card">
+          <h4 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide mb-2">Surface Details</h4>
+          <div className="space-y-1.5 text-sm text-muted-foreground">
+            <div><span className="text-foreground font-medium">Kerb tags:</span> {selectedRoute.osm_summary.kerb_nodes_count}</div>
+            {Object.keys(selectedRoute.osm_summary.surfaces).length > 0 && (
+              <div><span className="text-foreground font-medium">Surfaces:</span> {Object.entries(selectedRoute.osm_summary.surfaces).map(([k, v]) => `${k} (${v})`).join(', ')}</div>
+            )}
+            <div>
+              <span className="text-foreground font-medium">Unknown surface: </span>
+              <span className={selectedRoute.osm_summary.unknown_surface_ratio > 0.5 ? 'text-danger font-semibold' : ''}>
+                {Math.round(selectedRoute.osm_summary.unknown_surface_ratio * 100)}%
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Warnings */}
+      {(selectedRoute.flags?.length > 0 || (selectedRoute.osm_summary?.steps_count ?? 0) > 0) && (
+        <div className="border border-warning/30 bg-warning/5 rounded-xl p-3">
+          <h4 className="text-sm font-semibold text-warning uppercase tracking-wide mb-2 flex items-center gap-1.5">
+            <AlertTriangle className="h-4 w-4" />Warnings
+          </h4>
+          <ul className="space-y-1">
+            {(selectedRoute.osm_summary?.steps_count ?? 0) > 0 && (
+              <li className="text-sm text-warning flex items-start gap-2">
+                <span className="mt-1.5 h-1 w-1 rounded-full bg-warning shrink-0" />
+                {selectedRoute.osm_summary!.steps_count} step section(s) on this route
+              </li>
+            )}
+            {selectedRoute.flags?.map((f, i) => (
+              <li key={i} className="text-sm text-warning flex items-start gap-2">
+                <span className="mt-1.5 h-1 w-1 rounded-full bg-warning shrink-0" />{f}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* Actions */}
+      <div className="space-y-2">
+        {showEnrichBtn && (
+          <Button variant="outline" size="sm" className="w-full" onClick={enrichSelectedRoute} disabled={!canEnrich}>
+            {isEnriching || enrichingRouteIds.has(selectedRoute.id)
+              ? <><RefreshCw className="h-3.5 w-3.5 animate-spin" />Loading OSM...</>
+              : <><RefreshCw className="h-3.5 w-3.5" />Retry OSM Enrichment</>}
+          </Button>
+        )}
+        <Button variant="outline" size="sm" className="w-full" onClick={loadNearbyVenues} disabled={isLoadingVenues}>
+          {isLoadingVenues ? <><Loader2 className="h-3.5 w-3.5 animate-spin" />Loading Venues...</> : <><MapPin className="h-3.5 w-3.5" />Load Nearby Venues</>}
+        </Button>
+      </div>
+    </div>
+  ) : (
+    <div className="flex items-center justify-center h-32 text-sm text-muted-foreground">
+      Select a route to see details
+    </div>
+  );
+
+  const venuesPanel = (
+    <div className="p-3 space-y-2">
+      {venues.length === 0 ? (
+        <div className="flex flex-col items-center justify-center py-10 text-center text-muted-foreground">
+          <MapPin className="h-8 w-8 opacity-20 mb-2" />
+          <p className="text-sm">No venues loaded</p>
+          <p className="text-xs opacity-70 mt-1">Go to Details and click Load Nearby Venues</p>
+        </div>
+      ) : (
+        venues.slice(0, 8).map(venue => (
+          <VenueCard
+            key={venue.osm_id}
+            venue={venue}
+            isSelected={venue.osm_id === selectedVenue?.osm_id}
+            reviewCount={(venueReviews[venue.osm_id] ?? []).length}
+            isLoadingReviews={loadingReviewVenueIds.has(venue.osm_id)}
+            onSelect={() => selectVenue(venue)}
+            onOpenReviews={() => navigate(`/review?venue_id=${encodeURIComponent(venue.osm_id)}&venue_name=${encodeURIComponent(venue.name)}`)}
+          />
+        ))
+      )}
+    </div>
+  );
+
+  return (
+    <div className="flex-1 flex flex-col overflow-hidden">
+      {/* Search bar */}
+      <div className="bg-card border-b border-border px-4 py-3 shrink-0 z-[800] relative">
+        <div className="flex flex-col sm:flex-row gap-2">
+          {/* From */}
+          <div className="flex-1 relative">
+            <div className="relative">
+              <Navigation className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-primary pointer-events-none" />
+              <Input
+                data-address-kind="start"
+                value={startAddress}
+                onChange={e => { setStartAddress(e.target.value); setStartLabel(''); }}
+                onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); handleAddressEnter('start'); } }}
+                placeholder="From — e.g. Belfast City Hall"
+                className="pl-9 h-11 text-sm"
+              />
+            </div>
+            {(isLoadingStartSugg || startSuggestions.length > 0) && (
+              <div className="absolute top-full left-0 right-0 mt-1 bg-card border border-border rounded-lg shadow-lg overflow-hidden z-[900]">
+                {isLoadingStartSugg && startSuggestions.length === 0 && <div className="px-3 py-2 text-xs text-muted-foreground">Searching...</div>}
+                {startSuggestions.map(r => (
+                  <button key={`${r.lat},${r.lon}`} type="button" onClick={() => applyGeocode('start', r)}
+                    className="w-full text-left px-3 py-2 text-xs text-foreground hover:bg-accent border-b border-border/50 last:border-0">
+                    {r.label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* To */}
+          <div className="flex-1 relative">
+            <div className="relative">
+              <MapPin className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-destructive pointer-events-none" />
+              <Input
+                data-address-kind="end"
+                value={endAddress}
+                onChange={e => { setEndAddress(e.target.value); setEndLabel(''); }}
+                onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); handleAddressEnter('end'); } }}
+                placeholder="To — e.g. St Anne's Cathedral"
+                className="pl-9 h-11 text-sm"
+              />
+            </div>
+            {(isLoadingEndSugg || endSuggestions.length > 0) && (
+              <div className="absolute top-full left-0 right-0 mt-1 bg-card border border-border rounded-lg shadow-lg overflow-hidden z-[900]">
+                {isLoadingEndSugg && endSuggestions.length === 0 && <div className="px-3 py-2 text-xs text-muted-foreground">Searching...</div>}
+                {endSuggestions.map(r => (
+                  <button key={`${r.lat},${r.lon}`} type="button" onClick={() => applyGeocode('end', r)}
+                    className="w-full text-left px-3 py-2 text-xs text-foreground hover:bg-accent border-b border-border/50 last:border-0">
+                    {r.label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Buttons */}
+          <div className="flex gap-2 shrink-0">
+            <Button onClick={fetchRoutes} disabled={isFindingRoutes} size="sm" className="h-11 px-5">
+              {isFindingRoutes ? <><Loader2 className="h-3.5 w-3.5 animate-spin" />Finding...</> : <><RouteIcon className="h-3.5 w-3.5" />Find Routes</>}
+            </Button>
+            {(startAddress || endAddress) && (
+              <Button variant="outline" size="sm" className="h-11 px-3" onClick={() => {
+                setStart(null); setEnd(null); setStartAddress(''); setEndAddress(''); setStartLabel(''); setEndLabel(''); clearDerived(); setErrorMessage('');
+              }}>✕</Button>
+            )}
+          </div>
         </div>
 
-        {/* Elevation profile */}
-        {selectedRoute?.elevation_profile && (
-          <div style={s.card}>
-            <div style={s.sectionTitle}>Elevation Profile</div>
-            <ResponsiveContainer width="100%" height={160}>
-              <LineChart data={selectedRoute.elevation_profile}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
-                <XAxis
-                  dataKey="dist_m"
-                  label={{ value: 'Distance (m)', position: 'insideBottom', offset: -4, fontSize: 11 }}
-                  tick={{ fontSize: 11 }}
-                />
-                <YAxis
-                  dataKey="elev_m"
-                  label={{ value: 'Elev (m)', angle: -90, position: 'insideLeft', fontSize: 11 }}
-                  tick={{ fontSize: 11 }}
-                />
-                <Tooltip
-                  contentStyle={{ fontSize: '12px', borderRadius: '8px', border: '1px solid #e9ecef' }}
-                  formatter={(v: unknown) => [`${(v as number).toFixed(1)} m`, 'Elevation']}
-                  labelFormatter={(v: unknown) => `${v} m along route`}
-                />
-                <Line type="monotone" dataKey="elev_m" stroke="#667eea" strokeWidth={2} dot={false} />
-              </LineChart>
-            </ResponsiveContainer>
-          </div>
-        )}
-
-        {/* Score breakdown */}
-        {selectedRoute?.score_breakdown && (
-          <div style={s.card}>
-            <div style={s.sectionTitle}>Score Breakdown</div>
-            <div style={{ fontSize: '13px', color: '#495057', display: 'grid', gap: '6px' }}>
-              <div style={{
-                display: 'flex',
-                justifyContent: 'space-between',
-                padding: '8px 12px',
-                background: `${scoreColor(selectedRoute.accessibility_score)}18`,
-                borderRadius: '8px',
-                fontWeight: 700,
-                color: scoreColor(selectedRoute.accessibility_score),
-                marginBottom: '4px',
-              }}>
-                <span>Total score</span>
-                <span>{selectedRoute.accessibility_score} (lower = better)</span>
-              </div>
-              {[
-                ['Distance', selectedRoute.score_breakdown.distance_penalty],
-                ['Ascent', selectedRoute.score_breakdown.ascent_penalty],
-                ['Steep slope distance', selectedRoute.score_breakdown.steep_slope_penalty],
-                ['Maximum slope', selectedRoute.score_breakdown.max_slope_penalty],
-                ['Steps', selectedRoute.score_breakdown.steps_penalty],
-                ['Rough surface', selectedRoute.score_breakdown.surface_penalty],
-                ['Missing surface data', selectedRoute.score_breakdown.uncertainty_penalty],
-              ].map(([label, val]) => (
-                <div
-                  key={label as string}
-                  style={{
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    gap: '12px',
-                    padding: '3px 8px',
-                    borderRadius: '6px',
-                    background: penaltyBackground(Number(val)),
-                  }}
-                >
-                  <span>
-                    {label}
-                    <span style={{ color: '#6c757d', fontSize: '11px', marginLeft: '8px' }}>
-                      {formatScoreContext(selectedRoute, label as string)}
-                    </span>
-                  </span>
-                  <span
-                    style={{
-                      fontWeight: 700,
-                      color: penaltyColor(Number(val)),
-                    }}
-                  >
-                    +{val}
-                  </span>
-                </div>
-              ))}
-              <div style={{ color: '#adb5bd', fontSize: '11px', marginTop: '4px', lineHeight: 1.5 }}>
-                Scores are weighted accessibility penalty points, not physical units. Lower is better.
-                Amber/red rows show the factors that most increase the route score.
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Surface details */}
-        {selectedRoute?.osm_summary && (() => {
-          const osm = selectedRoute.osm_summary!;
-          return (
-            <div style={s.card}>
-              <div style={s.sectionTitle}>Surface Details</div>
-              <div style={{ fontSize: '13px', color: '#495057', display: 'grid', gap: '6px' }}>
-                <div><strong>Kerb drop tag count:</strong> {osm.kerb_nodes_count}</div>
-                {Object.keys(osm.surfaces).length > 0 && (
-                  <div>
-                    <strong>Surface tag counts:</strong>{' '}
-                    {Object.entries(osm.surfaces).map(([k, v]) => `${k} (${v})`).join(', ')}
-                  </div>
-                )}
-                {Object.keys(osm.smoothness).length > 0 && (
-                  <div>
-                    <strong>Smoothness tag counts:</strong>{' '}
-                    {Object.entries(osm.smoothness).map(([k, v]) => `${k} (${v})`).join(', ')}
-                  </div>
-                )}
-                <div>
-                  <strong>Unknown surface coverage:</strong>{' '}
-                  <span style={{
-                    color: osm.unknown_surface_ratio > 0.5 ? '#dc3545' : '#495057',
-                    fontWeight: osm.unknown_surface_ratio > 0.5 ? 600 : 400,
-                  }}>
-                    {(osm.unknown_surface_ratio * 100).toFixed(0)}%
-                  </span>
-                </div>
-                <div style={{ color: '#868e96', fontSize: '11px', lineHeight: 1.5 }}>
-                  Numbers in brackets are counts of nearby OpenStreetMap tags found during enrichment, not metres.
-                </div>
-              </div>
-            </div>
-          );
-        })()}
-
-        {/* Nearby venues */}
-        {(routes.length > 0 || venues.length > 0) && (
-          <div style={s.card}>
-            <div style={s.sectionTitle}>Nearby Venues</div>
-            <div style={{ display: 'grid', gap: '8px' }}>
-              {venues.slice(0, 8).map((venue) => {
-                const isSelected = venue.osm_id === selectedVenue?.osm_id;
-                const wColor = wheelchairColor(venue.wheelchair);
-                const reviews = venueReviews[venue.osm_id] ?? [];
-                const isLoadingReviews = loadingReviewVenueIds.has(venue.osm_id);
-                return (
-                  <button
-                    key={venue.osm_id}
-                    onClick={() => selectVenue(venue)}
-                    style={{
-                      background: isSelected ? '#f0f3ff' : 'white',
-                      border: `2px solid ${isSelected ? '#667eea' : '#e9ecef'}`,
-                      borderRadius: '10px',
-                      padding: '10px 12px',
-                      fontSize: '13px',
-                      cursor: 'pointer',
-                      width: '100%',
-                      textAlign: 'left',
-                      transition: 'all 0.15s',
-                    }}
-                  >
-                    <div style={{ fontWeight: 600, marginBottom: '2px' }}>{venue.name}</div>
-                    <div style={{ fontSize: '12px', color: '#6c757d', display: 'flex', gap: '8px' }}>
-                      <span>{venue.category}</span>
-                      <span style={{ color: wColor, fontWeight: 500 }}>
-                        Wheelchair: {venue.wheelchair}
-                      </span>
-                      <span>
-                        {isLoadingReviews
-                          ? 'Reviews loading...'
-                          : `${reviews.length} review${reviews.length !== 1 ? 's' : ''}`}
-                      </span>
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        )}
-
-        {/* Selected venue */}
-        {selectedVenue && (
-          <div ref={selectedVenuePanelRef} style={s.card}>
-            <div style={s.sectionTitle}>Venue Accessibility</div>
-            <div style={{ fontSize: '13px', color: '#495057', display: 'grid', gap: '6px', marginBottom: '16px' }}>
-              <div style={{ fontWeight: 700, fontSize: '15px', color: '#212529' }}>{selectedVenue.name}</div>
-              <div><strong>Category:</strong> {selectedVenue.category}</div>
-              <div>
-                <strong>Wheelchair access:</strong>{' '}
-                <span style={{
-                  color: wheelchairColor(selectedVenue.wheelchair),
-                  fontWeight: 600,
-                  background: `${wheelchairColor(selectedVenue.wheelchair)}18`,
-                  padding: '1px 8px',
-                  borderRadius: '20px',
-                }}>
-                  {selectedVenue.wheelchair}
-                </span>
-              </div>
-              {selectedVenue.entrance && <div><strong>Entrance:</strong> {selectedVenue.entrance}</div>}
-              {selectedVenue.surface && <div><strong>Surface:</strong> {selectedVenue.surface}</div>}
-              {selectedVenue.tactile_paving && (
-                <div><strong>Tactile paving:</strong> {selectedVenue.tactile_paving}</div>
-              )}
-            </div>
-
-            <div
-              style={{
-                border: '1px solid #e9ecef',
-                borderRadius: '8px',
-                padding: '10px',
-                marginBottom: '12px',
-                background: '#fbfcfd',
-              }}
-            >
-              <div style={{ fontSize: '13px', fontWeight: 700, color: '#212529', marginBottom: '8px' }}>
-                {isSelectedVenueReviewsLoading
-                  ? 'Loading reviews...'
-                  : `${selectedVenueReviews.length} Review${selectedVenueReviews.length !== 1 ? 's' : ''}`}
-              </div>
-              <div style={{ fontSize: '12px', color: '#6c757d', lineHeight: 1.45 }}>
-                Review details open on the map when this venue is selected.
-              </div>
-            </div>
-
-            <button
-              onClick={() =>
-                navigate(
-                  `/review?venue_id=${encodeURIComponent(selectedVenue.osm_id)}&venue_name=${encodeURIComponent(selectedVenue.name)}`,
-                )
-              }
-              style={{
-                ...s.btn('#667eea'),
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                gap: '6px',
-              }}
-              onMouseOver={(e) => (e.currentTarget.style.background = '#5568d3')}
-              onMouseOut={(e) => (e.currentTarget.style.background = '#667eea')}
-            >
-              View & Write Reviews
-            </button>
+        {/* Status row */}
+        {(start || end || errorMessage) && (
+          <div className="flex items-center gap-4 mt-2 text-sm text-muted-foreground">
+            {start && <span className="flex items-center gap-1"><span className="h-2 w-2 rounded-full bg-primary inline-block" />From: {startLabel || `${start[0].toFixed(4)}, ${start[1].toFixed(4)}`}</span>}
+            {end && <span className="flex items-center gap-1"><span className="h-2 w-2 rounded-full bg-destructive inline-block" />To: {endLabel || `${end[0].toFixed(4)}, ${end[1].toFixed(4)}`}</span>}
+            {errorMessage && <span className="text-warning font-medium">{errorMessage}</span>}
           </div>
         )}
       </div>
 
-      {/* ── Map ── */}
-      <div style={s.mapWrap}>
-        {venues.length > 0 && (
-          <div
-            style={{
-              position: 'absolute',
-              top: '12px',
-              right: '12px',
-              zIndex: 500,
-              background: 'rgba(255,255,255,0.94)',
-              border: '1px solid #dee2e6',
-              borderRadius: '8px',
-              padding: '8px 10px',
-              display: 'grid',
-              gap: '5px',
-              fontSize: '12px',
-              color: '#343a40',
-              boxShadow: '0 3px 10px rgba(0,0,0,0.12)',
-            }}
-          >
-            {[
-              ['#0d6efd', 'S', 'Start'],
-              ['#dc3545', 'E', 'End'],
-              ['#dc3545', '!', 'Steps'],
-            ].map(([color, label, text]) => (
-              <div key={text} style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                <span
-                  style={{
-                    width: '16px',
-                    height: '16px',
-                    borderRadius: '50%',
-                    background: color,
-                    color: '#fff',
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    fontSize: '10px',
-                    fontWeight: 800,
-                  }}
-                >
-                  {label}
-                </span>
-                <span>{text}</span>
-              </div>
-            ))}
-            {venues.length > 0 && [
-              ['yes', 'A', 'Accessible venue'],
-              ['limited', 'L', 'Limited venue'],
-              ['no', 'N', 'Not accessible venue'],
-              ['unknown', '?', 'Unknown venue'],
-            ].map(([status, label, text]) => (
-              <div key={status} style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                <span
-                  style={{
-                    width: '16px',
-                    height: '16px',
-                    borderRadius: '50%',
-                    background: wheelchairColor(status),
-                    color: '#fff',
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    fontSize: '10px',
-                    fontWeight: 800,
-                  }}
-                >
-                  {label}
-                </span>
-                <span>{text}</span>
-              </div>
-            ))}
-          </div>
-        )}
-
-        {selectedVenue && (
-          <div
-            style={{
-              position: 'absolute',
-              left: '16px',
-              bottom: '16px',
-              zIndex: 650,
-              width: 'min(440px, calc(100% - 32px))',
-              maxHeight: '58%',
-              background: 'rgba(255,255,255,0.96)',
-              border: '1px solid #dee2e6',
-              borderRadius: '8px',
-              boxShadow: '0 8px 24px rgba(0,0,0,0.22)',
-              overflow: 'hidden',
-            }}
-          >
-            <div
-              style={{
-                padding: '12px 14px',
-                borderBottom: '1px solid #e9ecef',
-                display: 'flex',
-                justifyContent: 'space-between',
-                gap: '12px',
-                alignItems: 'flex-start',
-              }}
-            >
-              <div>
-                <div style={{ fontSize: '15px', fontWeight: 800, color: '#212529' }}>
-                  {selectedVenue.name}
+      {/* Map + Sidebar */}
+      <div className="flex-1 flex overflow-hidden">
+        {/* Map */}
+        <div className="flex-1 relative">
+          {/* Venue popup */}
+          {selectedVenue && (
+            <div className="absolute left-4 bottom-4 z-[650] w-[min(400px,calc(100%-32px))] max-h-[55%] bg-card/96 border border-border rounded-xl shadow-xl overflow-hidden flex flex-col">
+              <div className="flex items-start justify-between gap-3 px-4 py-3 border-b border-border shrink-0">
+                <div>
+                  <p className="font-semibold text-sm text-foreground">{selectedVenue.name}</p>
+                  <p className="text-xs text-muted-foreground mt-0.5">{selectedVenue.category} · {wheelchairLabel(selectedVenue.wheelchair)}</p>
                 </div>
-                <div style={{ fontSize: '12px', color: '#6c757d', marginTop: '2px' }}>
-                  {selectedVenue.category} · Wheelchair: {selectedVenue.wheelchair}
-                </div>
+                <button onClick={() => setSelectedVenue(null)} className="h-6 w-6 rounded-full bg-muted flex items-center justify-center text-muted-foreground hover:bg-muted/80 shrink-0 text-xs">✕</button>
               </div>
-              <button
-                type="button"
-                onClick={() => setSelectedVenue(null)}
-                style={{
-                  border: 'none',
-                  background: '#f1f3f5',
-                  borderRadius: '50%',
-                  width: '26px',
-                  height: '26px',
-                  cursor: 'pointer',
-                  fontWeight: 800,
-                  color: '#495057',
-                }}
-                aria-label="Close venue reviews"
-              >
-                x
-              </button>
-            </div>
-
-            <div style={{ padding: '12px 14px', maxHeight: '330px', overflowY: 'auto' }}>
-              <div style={{ fontSize: '13px', fontWeight: 800, marginBottom: '10px', color: '#212529' }}>
-                {isSelectedVenueReviewsLoading
-                  ? 'Loading reviews...'
-                  : `${selectedVenueReviews.length} Review${selectedVenueReviews.length !== 1 ? 's' : ''}`}
-              </div>
-
-              {!isSelectedVenueReviewsLoading && selectedVenueReviews.length === 0 && (
-                <div style={{ fontSize: '13px', color: '#6c757d', marginBottom: '12px' }}>
-                  No reviews yet.
-                </div>
-              )}
-
-              {selectedVenueReviews.length > 0 && (
-                <div style={{ display: 'grid', gap: '10px' }}>
-                  {selectedVenueReviews.map((review) => (
-                    <div
-                      key={review.id}
-                      style={{
-                        border: '1px solid #edf0f2',
-                        borderRadius: '8px',
-                        padding: '10px',
-                        background: '#fff',
-                        fontSize: '12px',
-                        color: '#495057',
-                      }}
-                    >
-                      <div style={{ display: 'flex', justifyContent: 'space-between', gap: '8px', marginBottom: '4px' }}>
-                        <strong style={{ color: '#212529' }}>Rating {review.rating}/5</strong>
-                        <span style={{ color: '#868e96' }}>
-                          {new Date(review.created_at).toLocaleDateString('en-GB')}
-                        </span>
+              <div className="p-4 overflow-y-auto flex-1">
+                <p className="text-xs font-semibold text-foreground mb-2">
+                  {isVenueReviewsLoading ? 'Loading reviews...' : `${selectedVenueReviews.length} Review${selectedVenueReviews.length !== 1 ? 's' : ''}`}
+                </p>
+                {!isVenueReviewsLoading && selectedVenueReviews.length === 0 && <p className="text-xs text-muted-foreground">No reviews yet.</p>}
+                <div className="space-y-2">
+                  {selectedVenueReviews.map(rv => (
+                    <div key={rv.id} className="border border-border rounded-lg p-2.5 text-xs">
+                      <div className="flex justify-between mb-1">
+                        <span className="font-semibold text-foreground">Rating {rv.rating}/5</span>
+                        <span className="text-muted-foreground">{new Date(rv.created_at).toLocaleDateString('en-GB')}</span>
                       </div>
-                      <div style={{ lineHeight: 1.45 }}>{review.comment}</div>
-                      {review.accessibility_notes && (
-                        <div style={{ marginTop: '5px', color: '#667eea', lineHeight: 1.4 }}>
-                          {review.accessibility_notes}
-                        </div>
-                      )}
-                      {review.image_url && (
-                        <img
-                          src={`${API_BASE_URL}${review.image_url}`}
-                          alt="Review upload"
-                          style={{
-                            width: '100%',
-                            maxHeight: '150px',
-                            objectFit: 'cover',
-                            borderRadius: '6px',
-                            marginTop: '8px',
-                          }}
-                        />
-                      )}
+                      <p className="text-muted-foreground leading-relaxed">{rv.comment}</p>
+                      {rv.accessibility_notes && <p className="mt-1 text-primary">{rv.accessibility_notes}</p>}
+                      {rv.image_url && <img src={`${API_BASE_URL}${rv.image_url}`} alt="" className="mt-2 w-full max-h-28 object-cover rounded" />}
                     </div>
                   ))}
                 </div>
-              )}
-
-              <button
-                onClick={() =>
-                  navigate(
-                    `/review?venue_id=${encodeURIComponent(selectedVenue.osm_id)}&venue_name=${encodeURIComponent(selectedVenue.name)}`,
-                  )
-                }
-                style={{ ...s.btn('#667eea'), marginTop: '12px' }}
-                onMouseOver={(e) => (e.currentTarget.style.background = '#5568d3')}
-                onMouseOut={(e) => (e.currentTarget.style.background = '#667eea')}
-              >
-                View & Write Reviews
-              </button>
+                <Button size="sm" className="w-full mt-3" onClick={() => navigate(`/review?venue_id=${encodeURIComponent(selectedVenue.osm_id)}&venue_name=${encodeURIComponent(selectedVenue.name)}`)}>
+                  View &amp; Write Reviews
+                </Button>
+              </div>
             </div>
-          </div>
-        )}
+          )}
 
-        <MapContainer
-          center={[54.6, -5.9]}
-          zoom={13}
-          style={{ height: '100%', width: '100%' }}
-        >
-          <TileLayer
-            url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-            attribution="&copy; OpenStreetMap contributors"
-          />
+          {/* Map legend */}
+          {venues.length > 0 && (
+            <div className="absolute top-3 right-3 z-[500] bg-card/95 border border-border rounded-xl p-3 shadow-sm text-xs space-y-1.5">
+              {[['#2563eb','S','Start'],['#dc2626','E','End'],['#dc2626','!','Steps'],['#16a34a','A','Accessible'],['#d97706','L','Limited'],['#dc2626','N','Not accessible'],['#6b7280','?','Unknown']].map(([c,l,t]) => (
+                <div key={t} className="flex items-center gap-2">
+                  <span className="h-4 w-4 rounded-full flex items-center justify-center text-white shrink-0" style={{ background: c, fontSize: '9px', fontWeight: 800 }}>{l}</span>
+                  <span className="text-muted-foreground">{t}</span>
+                </div>
+              ))}
+            </div>
+          )}
 
-          <FitToRoutes routes={routes} />
-          <FlyToFocusPoint point={mapFocusPoint} />
-
-          <ClickToSetPoints
-            start={start}
-            end={end}
-            setStart={setStart}
-            setEnd={setEnd}
-            onPointsChanged={(changed) => {
-              if (changed === 'start') {
-                setStartLabel('');
-                setStartAddress('');
-              }
-              if (changed === 'end') {
-                setEndLabel('');
-                setEndAddress('');
-              }
-              clearRouteDerivedState();
-            }}
-          />
-
-          {venues.map((venue) => {
-            const isSelected = venue.osm_id === selectedVenue?.osm_id;
-            const reviews = venueReviews[venue.osm_id] ?? [];
-            const isLoadingReviews = loadingReviewVenueIds.has(venue.osm_id);
-
-            return (
-              <Marker
-                key={venue.osm_id}
-                position={[venue.lat, venue.lon]}
-                icon={venueMarkerIcon(venue.wheelchair, isSelected)}
-                title={`${venue.name}: ${wheelchairLabel(venue.wheelchair)}`}
-                eventHandlers={{
-                  click: () => selectVenue(venue),
-                }}
-              >
-                <Popup>
-                  <div style={{ fontSize: '13px' }}>
-                    <strong>{venue.name}</strong>
-                    <br />
-                    {venue.category}
-                    <br />
-                    <span style={{ color: wheelchairColor(venue.wheelchair), fontWeight: 700 }}>
-                      {wheelchairLabel(venue.wheelchair)}
-                    </span>
-                    <br />
-                    Wheelchair tag: {venue.wheelchair}
-                    <br />
-                    {isLoadingReviews
-                      ? 'Loading reviews...'
-                      : `${reviews.length} review${reviews.length !== 1 ? 's' : ''}`}
-                    {reviews.length > 0 && (
-                      <div
-                        style={{
-                          maxHeight: '130px',
-                          overflowY: 'auto',
-                          borderTop: '1px solid #e9ecef',
-                          marginTop: '6px',
-                          paddingTop: '6px',
-                          minWidth: '220px',
-                        }}
-                      >
-                        {reviews.map((review) => (
-                          <div key={review.id} style={{ marginBottom: '8px' }}>
-                            <strong>Rating {review.rating}/5</strong>
-                            <div style={{ lineHeight: 1.35 }}>{review.comment}</div>
-                            {review.accessibility_notes && (
-                              <div style={{ color: '#667eea', lineHeight: 1.35 }}>
-                                {review.accessibility_notes}
-                              </div>
-                            )}
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                    <div style={{ display: 'flex', gap: '6px', marginTop: '6px' }}>
-                      <button
-                        onClick={() =>
-                          navigate(
-                            `/review?venue_id=${encodeURIComponent(venue.osm_id)}&venue_name=${encodeURIComponent(venue.name)}`,
-                          )
-                        }
-                        style={{ cursor: 'pointer' }}
-                      >
-                        View reviews
-                      </button>
-                    </div>
-                  </div>
-                </Popup>
-              </Marker>
-            );
-          })}
-
-          {routes.map((r) => (
-            <Polyline
-              key={r.id}
-              positions={r.geometry}
-              pathOptions={{
-                color: r.id === selectedRouteId ? '#667eea' : '#dc3545',
-                weight: r.id === selectedRouteId ? 6 : 3,
-                opacity: r.id === selectedRouteId ? 1 : 0.5,
+          <MapContainer center={[54.6, -5.9]} zoom={13} style={{ height: '100%', width: '100%' }}>
+            <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" attribution="&copy; OpenStreetMap contributors" />
+            <FitToRoutes routes={routes} />
+            <FlyToFocusPoint point={mapFocusPoint} />
+            <ClickToSetPoints start={start} end={end} setStart={setStart} setEnd={setEnd}
+              onPointsChanged={changed => {
+                if (changed === 'start') { setStartLabel(''); setStartAddress(''); }
+                if (changed === 'end') { setEndLabel(''); setEndAddress(''); }
+                clearDerived();
               }}
             />
-          ))}
+            {venues.map(v => (
+              <Marker key={v.osm_id} position={[v.lat, v.lon]}
+                icon={circleMarkerIcon(v.wheelchair === 'yes' ? 'A' : v.wheelchair === 'limited' ? 'L' : v.wheelchair === 'no' ? 'N' : '?', wheelchairColor(v.wheelchair), v.osm_id === selectedVenue?.osm_id ? 34 : 28)}
+                eventHandlers={{ click: () => selectVenue(v) }}>
+                <Popup><div className="text-sm"><strong>{v.name}</strong><br />{v.category}<br /><span style={{ color: wheelchairColor(v.wheelchair), fontWeight: 700 }}>{wheelchairLabel(v.wheelchair)}</span></div></Popup>
+              </Marker>
+            ))}
+            {routes.map(r => (
+              <Polyline key={r.id} positions={r.geometry}
+                pathOptions={{ color: r.id === selectedRouteId ? '#2563eb' : '#94a3b8', weight: r.id === selectedRouteId ? 6 : 3, opacity: r.id === selectedRouteId ? 1 : 0.5 }} />
+            ))}
+            {selectedRoute?.osm_summary?.steps_ways?.map((sw, i) => {
+              const wp = midpoint(sw.geometry);
+              return (
+                <React.Fragment key={`sw-${sw.osm_id ?? i}`}>
+                  <Polyline positions={sw.geometry} pathOptions={{ color: 'red', weight: 8, opacity: 1 }}><Popup>Steps on this section.</Popup></Polyline>
+                  {wp && <Marker position={wp} icon={circleMarkerIcon('!', '#dc2626', 24)}><Popup>Steps here.</Popup></Marker>}
+                </React.Fragment>
+              );
+            })}
+            {selectedRoute?.step_warnings?.map((w, i) => (
+              <Marker key={`warn-${w.osm_id ?? i}`} position={[w.lat, w.lon]} icon={circleMarkerIcon('!', '#dc2626', 24)}>
+                <Popup>Steps at ~{Math.round(w.dist_m)}m along route</Popup>
+              </Marker>
+            ))}
+          </MapContainer>
+        </div>
 
-          {selectedRoute?.osm_summary?.steps_ways?.map((sw, i) => {
-            const warningPoint = midpoint(sw.geometry);
-
-            return (
-              <React.Fragment key={`steps-${sw.osm_id ?? i}`}>
-                <Polyline
-                  positions={sw.geometry}
-                  pathOptions={{ color: 'red', weight: 8, opacity: 1 }}
-                >
-                  <Popup>
-                    Steps found on this section of the selected route.
-                  </Popup>
-                </Polyline>
-                {warningPoint && (
-                  <Marker
-                    position={warningPoint}
-                    icon={circleMarkerIcon('!', '#dc3545', 24)}
-                    title="Step warning"
-                  >
-                    <Popup>
-                      Steps found on this section of the selected route.
-                    </Popup>
-                  </Marker>
-                )}
-              </React.Fragment>
-            );
-          })}
-
-          {selectedRoute?.step_warnings?.map((w, i) => (
-            <Marker
-              key={`warn-${w.osm_id ?? i}`}
-              position={[w.lat, w.lon]}
-              icon={circleMarkerIcon('!', '#dc3545', 24)}
-              title="Step warning"
-            >
-              <Popup>Steps at ~{Math.round(w.dist_m)}m along route</Popup>
-            </Marker>
-          ))}
-        </MapContainer>
+        {/* Right sidebar */}
+        <aside className="hidden md:flex w-[560px] border-l border-border flex-col bg-background overflow-hidden shrink-0">
+          <Tabs value={activeTab} onValueChange={setActiveTab} className="flex-1 flex flex-col overflow-hidden">
+            <div className="px-3 pt-2 pb-0 shrink-0">
+              <TabsList className="w-full">
+                <TabsTrigger value="routes" className="flex-1 text-sm">Routes {routes.length > 0 && `(${routes.length})`}</TabsTrigger>
+                <TabsTrigger value="details" className="flex-1 text-sm" disabled={!selectedRouteId}>Details</TabsTrigger>
+                <TabsTrigger value="venues" className="flex-1 text-sm">Venues {venues.length > 0 && `(${venues.length})`}</TabsTrigger>
+              </TabsList>
+            </div>
+            <TabsContent value="routes" className="flex-1 overflow-hidden m-0">
+              <ScrollArea className="h-full">{routesPanel}</ScrollArea>
+            </TabsContent>
+            <TabsContent value="details" className="flex-1 overflow-hidden m-0">
+              <ScrollArea className="h-full">{detailsPanel}</ScrollArea>
+            </TabsContent>
+            <TabsContent value="venues" className="flex-1 overflow-hidden m-0">
+              <ScrollArea className="h-full">{venuesPanel}</ScrollArea>
+            </TabsContent>
+          </Tabs>
+        </aside>
       </div>
     </div>
   );
@@ -1610,78 +664,3 @@ const RouteMap: React.FC = () => {
 
 export default RouteMap;
 
-// ─── Map utilities ────────────────────────────────────────────────────────────
-
-function ClickToSetPoints(props: {
-  start: [number, number] | null;
-  end: [number, number] | null;
-  setStart: (p: [number, number] | null) => void;
-  setEnd: (p: [number, number] | null) => void;
-  onPointsChanged: (changed: 'start' | 'end') => void;
-}) {
-  useMapEvents({
-    click(e) {
-      const p: [number, number] = [e.latlng.lat, e.latlng.lng];
-      if (!props.start) {
-        props.setStart(p);
-        props.onPointsChanged('start');
-      } else if (!props.end) {
-        props.setEnd(p);
-        props.onPointsChanged('end');
-      } else {
-        props.setStart(p);
-        props.setEnd(null);
-        props.onPointsChanged('start');
-        props.onPointsChanged('end');
-      }
-    },
-  });
-
-  return (
-    <>
-      {props.start && (
-        <Marker position={props.start} icon={circleMarkerIcon('S', '#0d6efd')} title="Start point">
-          <Popup>Start point</Popup>
-        </Marker>
-      )}
-      {props.end && (
-        <Marker position={props.end} icon={circleMarkerIcon('E', '#dc3545')} title="End point">
-          <Popup>End point</Popup>
-        </Marker>
-      )}
-    </>
-  );
-}
-
-function FitToRoutes({ routes }: { routes: Route[] }) {
-  const map = useMap();
-
-  useEffect(() => {
-    if (!routes.length) return;
-    const allPoints = routes.flatMap((r) => r.geometry);
-    if (allPoints.length) {
-      map.fitBounds(allPoints as [number, number][], { padding: [30, 30] });
-    }
-  }, [routes, map]);
-
-  return null;
-}
-
-function FlyToFocusPoint({ point }: { point: [number, number] | null }) {
-  const map = useMap();
-  const lastPointRef = useRef<string>('');
-
-  useEffect(() => {
-    if (!point) return;
-
-    const key = `${point[0].toFixed(6)},${point[1].toFixed(6)}`;
-    if (lastPointRef.current === key) return;
-    lastPointRef.current = key;
-
-    map.flyTo(point, Math.max(map.getZoom(), 16), {
-      duration: 0.8,
-    });
-  }, [point, map]);
-
-  return null;
-}
